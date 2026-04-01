@@ -1,0 +1,11 @@
+node_modules/
+.env
+session.json
+run-log.json
+.solver-cache/
+temp_chrome_profile/
+problem_dom.json
+dump_assignment_dom.js
+dump_problem_dom.js
+*.log
+.DS_Store
