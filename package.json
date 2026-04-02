@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node main.js",
+    "dry-run": "node main.js --dry-run",
     "auth": "node auth.js",
     "discover": "node dom_discover.js"
   },
