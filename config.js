@@ -23,8 +23,8 @@ export const SEL = {
   editorInput:    '.monaco-editor textarea',  // real input target
 
   // Buttons
-  submitBtn:      'button.tappable.ce-btn.btn.btn-primary.cr-judge-action.cr-judge-action--submit.btn.btn-primary.btn-small.btn-long',
-  testBtn:        'button.tappable.ce-btn.btn.btn-inverted.btn-small.btn-primary.bold.m-r-10',
+  submitBtn:      'button.cr-judge-action--submit',
+  testBtn:        'button.cr-judge-action--test, button:has-text("Test with custom input")',
 
   // Result
   resultPass:     '.test-result:has-text("Passed")',
