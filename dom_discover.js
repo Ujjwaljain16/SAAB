@@ -20,7 +20,7 @@ async function discover() {
   console.log('Waiting for you to navigate... (Checking every 5 seconds)');
 
   // Loop to check the DOM for known patterns
-  setInterval(async () => {
+  const interval = setInterval(async () => {
     try {
       const isQuestionPage = await page.evaluate(() => {
         // Simple heuristic: if monaco is on the page, we are probably in an assignment
@@ -63,6 +63,14 @@ async function discover() {
       // Ignore context destroyed errors when navigating
     }
   }, 5000);
+
+  // Auto-exit after 5 minutes to prevent hanging forever
+  setTimeout(async () => {
+    clearInterval(interval);
+    console.log('Auto-exiting after 5 minutes.');
+    await browser.close();
+    process.exit(0);
+  }, 300000);
 }
 
 discover().catch(console.error);
