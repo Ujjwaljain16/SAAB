@@ -1,8 +1,10 @@
 import 'dotenv/config';
 import { chromium } from 'playwright';
 import { getQueue } from './crawler.js';
-import { solve, solverStats, looksTruncated } from './solver.js';
+import { solve, solverStats, looksTruncated, solveMCQ, solveWorkspace } from './solver.js';
 import { injectAndSubmit } from './injector.js';
+import { slurpWorkspaceContext, injectWorkspaceContext, waitForWorkspaceReady } from './workspace_manager.js';
+import { slurpMCQContext, injectMCQAnswer } from './mcq_handler.js';
 import { SEL } from './config.js';
 import { normalizeScalerUrl } from './scaler_url.js';
 import { loginToScaler } from './scaler_login.js';
@@ -369,7 +371,7 @@ function buildProblemsUrl(assignmentUrl) {
 }
 
 function isLoginUrl(url) {
-  return /\/login\b/i.test(url || '');
+  return /\/(login|sign_in)\b/i.test(url || '');
 }
 
 async function ensureLoggedIn(page, ctx, reason = 'session check') {
@@ -380,6 +382,25 @@ async function ensureLoggedIn(page, ctx, reason = 'session check') {
   console.log(`Session expired (${reason}). Re-authenticating...`);
   await loginToScaler(page);
   await ctx.storageState({ path: 'session.json' }).catch(() => {});
+}
+
+
+async function detectProblemType(page) {
+    const isMcq = await page.locator('input[type="radio"], input[type="checkbox"]').count() > 0;
+    if (isMcq) return 'mcq';
+    
+    // Look for Launch button OR the actual workspace IDE frame if it loads automatically
+    const isLauncher = await page.evaluate(() => {
+       if (document.querySelector('#vscode-ide, iframe[allow*="clipboard-read"], .EditorLayout-module_container__Uxq1a, .code-editor-layer')) {
+           return true; 
+       }
+       const btns = Array.from(document.querySelectorAll('button, a'));
+       return btns.some(b => (b.innerText||'').match(/open ide|launch|vs\s*code/i));
+    });
+    
+    if (isLauncher) return 'launcher';
+
+    return 'coding';
 }
 
 async function run() {
@@ -397,7 +418,8 @@ async function run() {
 
   const ctx = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    channel: 'chrome', 
+    channel: 'chrome',
+    permissions: ['clipboard-read', 'clipboard-write'],
     args: [
       `--profile-directory=${profileName}`,
       '--disable-extensions',
@@ -410,6 +432,8 @@ async function run() {
     viewport: { width: 1280, height: 720 }
   });
   const log = [];
+  let haltRun = false;
+  let haltReason = '';
   try {
   const page = ctx.pages()[0] || await ctx.newPage();
 
@@ -434,9 +458,6 @@ async function run() {
     metrics.classesSkipped = queue.length - filteredQueue.length;
   }
 
-
-  let haltRun = false;
-  let haltReason = '';
 
   for (const { classUrl, pending, subject } of filteredQueue) {
     metrics.classesSeen += 1;
@@ -497,13 +518,95 @@ async function run() {
       }
 
       const targetLanguage = resolveTargetLanguage(subject);
-      const languageSet = await selectProblemLanguage(page, targetLanguage);
-      if (!languageSet) {
-        console.log(`    Warning: could not confirm language switch to ${targetLanguage}.`);
+      const type = await detectProblemType(page);
+      console.log(`    Detected problem type: ${type}`);
+      
+      let problemContent = await extractProblemContent(page);
+      let starterCode = '';
+
+      if (type === 'launcher') {
+        console.log('    Workspace detected. Executing immediately to prevent session loss...');
+        let result = 'fail';
+        const launchBtn = page.locator('button:has-text("Open IDE"), button:has-text("Launch"), a:has-text("Open IDE"), a:has-text("Launch"), div.launch-btn, span:has-text("Launch"), .LaunchButton-module_btn__o1LoJ').first();
+        if (await launchBtn.isVisible().catch(()=>false)) {
+            console.log('    Clicking Launch button...');
+            await launchBtn.click();
+            await page.waitForTimeout(3000); // Wait for potential active workspace warning
+            
+            const warningBtn = page.locator('a.LabWarning-module_endLabButton__CiMv5, a:has-text("Save and Open New Workspace")').first();
+            if (await warningBtn.isVisible().catch(()=>false)) {
+                console.log('    Previous workspace active. Closing it to open new one...');
+                await warningBtn.click();
+            }
+        }
+        
+        console.log('    Waiting for IDE to spin up (this could take minutes)...');
+        await waitForWorkspaceReady(page, 300000).catch((e) => console.log('    ' + e.message));
+        
+        console.log('    Slurping workspace context...');
+        const workspaceMap = await slurpWorkspaceContext(page);
+        console.log(`    Found ${Object.keys(workspaceMap).length} source files. Solving...`);
+        
+        metrics.solveAttempts += 1;
+        const wResult = await solveWorkspace(problemContent, workspaceMap);
+        
+        if (wResult && wResult.fileMap) {
+            if (!DRY_RUN) {
+                console.log('    Injecting code into workspace...');
+                await injectWorkspaceContext(page, wResult.fileMap);
+                console.log('    Saved workspace modifications. Validating...');
+                
+                try {
+                    const outSubmit = page.locator('button:has-text("Run Tests"), button:has-text("Submit"), button:has-text("Save & Next")').first();
+                    if (await outSubmit.isVisible()) {
+                        await outSubmit.click();
+                        await page.waitForTimeout(5000);
+                        const fb = await page.locator('.me-cr-test-case-feedback').innerText().catch(()=>'');
+                        if (/success|correct/i.test(fb)) result = 'pass';
+                    } else {
+                        result = 'dry-run'; 
+                    }
+                } catch(e) { result = 'dry-run'; }
+            } else {
+                console.log(`    [AI Reasoning]: ${wResult.reasoning || 'Executed successfully'}`);
+                console.log(`    DRY-RUN workspace preview modifications:`);
+                for (const [fName, fCode] of Object.entries(wResult.fileMap)) {
+                    console.log(`\n--- ${fName} ---`);
+                    console.log(previewCode(fCode));
+                    console.log(`----------------------------------\n`);
+                }
+                result = 'dry-run';
+            }
+        }
+        
+        if (result === 'dry-run') metrics.problemsDryRun += 1;
+        if (result === 'pass') metrics.problemsSolved += 1;
+        if (!['pass', 'dry-run'].includes(result)) metrics.problemsFailed += 1;
+
+        log.push({ title: problem.title, result });
+        const mark = result === 'pass' ? '✓' : (result === 'dry-run' ? '↺' : '✗');
+        console.log(`  ${mark} ${problem.title}`);
+        if (result === 'pass') markProblemComplete(runState, solveUrl);
+        
+        // Return to problems selection page cleanly
+        await page.goto(normalizeScalerUrl(problemsUrl), { waitUntil: 'domcontentloaded' });
+        await ensureLoggedIn(page, ctx, 'return to assignment problems');
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        continue;
       }
-      const selectedLanguageLabel = await getCurrentSelectedLanguageLabel(page);
-      const problemContent = await extractProblemContent(page);
-      const starterCode = await extractEditorStarterCode(page);
+
+      if (type === 'mcq') {
+        problemContent = await slurpMCQContext(page);
+      } else {
+        const languageSet = await selectProblemLanguage(page, targetLanguage);
+        if (!languageSet) {
+          console.log(`    Warning: could not confirm language switch to ${targetLanguage}.`);
+        }
+        const selectedLanguageLabel = await getCurrentSelectedLanguageLabel(page);
+        if (type !== 'mcq') {
+          starterCode = await extractEditorStarterCode(page);
+        }
+      }
 
       problemJobs.push({
         title: problem.title,
@@ -511,9 +614,10 @@ async function run() {
         classUrl,
         subject,
         targetLanguage,
-        selectedLanguageLabel,
+        selectedLanguageLabel: type === 'mcq' ? 'MCQ' : await getCurrentSelectedLanguageLabel(page),
         problemContent,
-        starterCode
+        starterCode,
+        type
       });
 
       await page.goto(normalizeScalerUrl(problemsUrl), { waitUntil: 'domcontentloaded' });
@@ -522,13 +626,21 @@ async function run() {
     }
 
     const solvedJobs = await mapWithConcurrency(problemJobs, SOLVE_CONCURRENCY, async (job) => {
-      console.log(`    Solving in batch: ${job.title}`);
-      const solveResult = await solve(`${job.problemContent.title}\n\n${job.problemContent.body}`, extractTestCases(job.problemContent.body), job.targetLanguage, {
-        starterCode: job.starterCode,
-        selectedLanguageLabel: job.selectedLanguageLabel,
-        previousFeedback: classifyFailureFeedback(''),
-        attempt: 1
-      });
+      if (job.type === 'launcher') return job; // solve sequentially inside iframe later
+      
+      console.log(`    Solving ${job.type} in batch: ${job.title}`);
+      let solveResult;
+      
+      if (job.type === 'mcq') {
+         solveResult = await solveMCQ(job.problemContent);
+      } else {
+         solveResult = await solve(`${job.problemContent.title}\n\n${job.problemContent.body}`, extractTestCases(job.problemContent.body), job.targetLanguage, {
+           starterCode: job.starterCode,
+           selectedLanguageLabel: job.selectedLanguageLabel,
+           previousFeedback: classifyFailureFeedback(''),
+           attempt: 1
+         });
+      }
 
       return { ...job, solveResult };
     });
@@ -543,6 +655,20 @@ async function run() {
       console.log(`\n  Solving: ${title}`);
       metrics.solveAttempts += 1;
 
+      if (job.type === 'launcher') continue; // Previously executed
+      
+      if (job.type === 'mcq') {
+         await page.goto(normalizeScalerUrl(solveUrl), { waitUntil: 'domcontentloaded' });
+         await ensureLoggedIn(page, ctx, 'problem page navigation');
+         await page.waitForLoadState('networkidle').catch(() => {});
+         
+         const mcqInjectResult = await injectMCQAnswer(page, solveResult.bestOptionIndex || 0);
+         log.push({ title, result: mcqInjectResult.status });
+         console.log(`  ${mcqInjectResult.status === 'pass' ? '✓' : '✗'} ${title} (${mcqInjectResult.verdict})`);
+         if (mcqInjectResult.status === 'pass') markProblemComplete(runState, solveUrl);
+         continue;
+      }
+      
       if (!solveResult?.ok) {
         if (solveResult?.type === 'rate_limit') {
           const waitSec = Number(solveResult.retryAfterSeconds || 5);
