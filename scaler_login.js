@@ -7,8 +7,8 @@ export async function loginToScaler(page) {
 
   await page.goto('https://www.scaler.com/login', { waitUntil: 'domcontentloaded' });
 
-  await page.fill('input[type="email"]', process.env.SCALER_EMAIL);
-  await page.fill('input[type="password"]', process.env.SCALER_PASS);
+  await page.fill('#user_email, input[name="user[email]"], input[placeholder*="Email"]', process.env.SCALER_EMAIL);
+  await page.fill('#user_password, input[name="user[password]"], input[type="password"]', process.env.SCALER_PASS);
 
   const submitButton = page.locator('button[type="submit"], button:has-text("LOGIN"), button:has-text("Login")').first();
   await submitButton.waitFor({ state: 'visible', timeout: 10000 });
