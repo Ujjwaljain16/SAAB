@@ -70,6 +70,35 @@ function stripMarkdownFences(text) {
     .trim();
 }
 
+/**
+ * Robust JSON extractor that finds the largest bracket-balanced block.
+ */
+function extractJsonBlock(text) {
+  const raw = stripMarkdownFences(text);
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    // Fallback: try to find a { ... } block
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+      const slice = raw.slice(start, end + 1);
+      try {
+        return JSON.parse(slice);
+      } catch (e2) {
+        // Last resort: remove common AI errors
+        const cleaned = slice
+          .replace(/\\n/g, ' ')
+          .replace(/\\"/g, '"')
+          .replace(/[\u0000-\u001F\u007F-\u009F]/g, "")
+          .trim();
+          try { return JSON.parse(cleaned); } catch(e3) { throw e; }
+      }
+    }
+    throw e;
+  }
+}
+
 function hasBalancedBrackets(code) {
   const pairs = { '{': '}', '(': ')', '[': ']' };
   const closing = new Set(Object.values(pairs));
@@ -532,13 +561,36 @@ async function generateWithGrok(promptText) {
   return { ok: true, text };
 }
 
-async function generateWithGroq(promptText, modelName = GROQ_MODEL) {
+async function generateWithGroq(promptText, modelName = GROQ_MODEL, maxTokens = MAX_OUTPUT_TOKENS, responseFormat = null) {
   if (!GROQ_API_KEY) {
     return { ok: false, type: 'provider_unavailable', message: 'Groq key not configured' };
   }
 
-  if (!modelName) {
-    return { ok: false, type: 'provider_unavailable', message: 'Groq model not configured' };
+  const payload = {
+    model: modelName,
+    messages: [{ role: 'user', content: promptText }],
+    temperature: 0.6, // Recommended for reasoning models
+    max_tokens: maxTokens,
+  };
+
+  // Enable reasoning-specific features for supported models
+  const isReasoningModel = modelName.includes('gpt-oss') || modelName.includes('qwen');
+  
+  if (isReasoningModel) {
+    payload.reasoning_format = "parsed"; // Separates <think> into its own field
+    if (modelName.includes('gpt-oss')) {
+      payload.reasoning_effort = "high";
+    } else if (modelName.includes('qwen')) {
+      payload.reasoning_effort = "default";
+    }
+  }
+
+  if (responseFormat === "application/json") {
+    payload.response_format = { type: "json_object" };
+    // JSON mode on reasoning models requires parsed or hidden
+    if (isReasoningModel) {
+        payload.reasoning_format = "parsed"; 
+    }
   }
 
   let res;
@@ -549,12 +601,7 @@ async function generateWithGroq(promptText, modelName = GROQ_MODEL) {
         'Authorization': `Bearer ${GROQ_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        model: modelName,
-        messages: [{ role: 'user', content: promptText }],
-        temperature: 0.2,
-        max_tokens: MAX_OUTPUT_TOKENS
-      })
+      body: JSON.stringify(payload)
     });
   } catch (error) {
     return {
@@ -593,12 +640,9 @@ async function generateWithGroq(promptText, modelName = GROQ_MODEL) {
     };
   }
 
-  const content = data?.choices?.[0]?.message?.content;
-  const text = typeof content === 'string'
-    ? content
-    : Array.isArray(content)
-      ? content.map((c) => (typeof c?.text === 'string' ? c.text : '')).join('\n')
-      : '';
+  const content = data?.choices?.[0]?.message?.content || "";
+  const reasoning = data?.choices?.[0]?.message?.reasoning || "";
+  const text = reasoning ? `<think>${reasoning}</think>${content}` : content;
 
   return { ok: true, text };
 }
@@ -893,4 +937,115 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
     type: 'incomplete_generation',
     message: 'Model output remained incomplete across retries.'
   };
+}
+
+export async function solveMCQ(problemContent) {
+  const prompt = `
+Solve the following multiple-choice question.
+
+TITLE: ${problemContent.title}
+BODY: ${problemContent.body}
+
+OPTIONS:
+${problemContent.options.map(o => `[${o.index}] ${o.label}: ${o.text}`).join('\n')}
+
+Based on the prompt and options above, you MUST return a valid JSON object. Do not return markdown blocks, only raw JSON.
+Example output:
+{
+  "bestOptionIndex": 2,
+  "reasoning": "Because option C correctly describes..."
+}`;
+
+  if (CLIENTS.length > 0 && problemContent.images && problemContent.images.length > 0) {
+    // Has images, use Gemini vision (not fully implemented with images yet, but route to Gemini)
+    // For now we just pass text to Gemini
+    try {
+      const result = await model.generateContent(prompt);
+      const text = result.response.text();
+      return extractJsonBlock(text);
+    } catch (e) {
+      console.log('Gemini vision MCQ failed', e.message);
+    }
+  }
+
+  // Fallback to groq if available
+  if (GROQ_API_KEY) {
+    try {
+      const gResult = await generateWithGroq(prompt, GROQ_MODEL, 2048, "application/json");
+      if (gResult.ok) {
+        return extractJsonBlock(gResult.text);
+      }
+    } catch(e) {
+      console.log('Groq JSON fallback failed', e);
+    }
+  }
+
+  return { bestOptionIndex: 0, reasoning: 'Fallback default.' };
+}
+
+export async function solveWorkspace(problemContent, workspaceMap) {
+  const prompt = `
+You are an expert backend LLD developer. Modify the files in this workspace to solve the given problem.
+
+PROBLEM TITLE: ${problemContent.title}
+PROBLEM BODY: ${problemContent.body}
+
+CURRENT WORKSPACE FILES:
+${Object.entries(workspaceMap).map(([file, content]) => `--- ${file} ---\n${content}\n--------------------`).join('\n\n')}
+
+Analyze all requirements. You MUST return exactly ONE valid JSON object with the following schema:
+{
+  "reasoning": "brief explanation",
+  "fileMap": {
+     "NameOfFileToModify.java": "complete new content of file with ALL modifications applied"
+  }
+}
+Do not return any conversational text, explanations, or citations before or after the JSON.
+Your entire response must be a single parseable JSON object. 
+Ensure every modified file contains the full compilation unit (including package, imports, and class declarations).
+Keep non-modified files UNCHANGED (do not include them in fileMap).
+`;
+
+  if (CLIENTS.length > 0) {
+    const modelName = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+    let attempts = 0;
+    while (attempts < 2) {
+      try {
+        const model = CLIENTS[0].getGenerativeModel({ model: modelName, generationConfig: { responseMimeType: "application/json" } });
+        solverStats.geminiRequests++;
+        const result = await model.generateContent(prompt);
+        const text = result.response.text();
+        return extractJsonBlock(text);
+      } catch(e) {
+        attempts++;
+        const errMsg = e.message || String(e);
+        console.log(`    Gemini Workspace attempt ${attempts} failed: ${errMsg.slice(0, 100)}...`);
+        
+        if (errMsg.includes('429') || errMsg.includes('quota')) {
+          console.log(`    Gemini rate limited. Shifting to Groq fallback...`);
+          break; // Exit Gemini loop to hit Groq block below
+        }
+        if (attempts >= 2) break;
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+  }
+
+  if (GROQ_API_KEY) {
+    try {
+      console.log('    Attempting Groq fallback (Llama-3.3-70B)...');
+      // Llama-3.3-70b doesn't use the specialized reasoning_format params
+      const gResult = await generateWithGroq(prompt, "llama-3.3-70b-versatile", 6000, "application/json"); 
+      solverStats.groqRequests++;
+      if (gResult.ok) {
+        return extractJsonBlock(gResult.text);
+      } else {
+        console.log(`    Groq fallback failed: ${gResult.message || 'unknown error'}`);
+      }
+    } catch(e) {
+      console.log('    Groq Workspace solver failed', e.message || e);
+    }
+  }
+
+  return { reasoning: 'failed', fileMap: {} };
 }
