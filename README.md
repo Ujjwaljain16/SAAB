@@ -62,6 +62,9 @@ npm start
 # MCQs only — fastest, zero risk
 npm run start:mcq
 
+# Labs only (DevOps terminal labs + VS Code IDE)
+npm run start:labs
+
 # Skip terminal labs (if you don't want AI touching DevOps labs)
 npm run start:skip-labs
 
@@ -77,6 +80,43 @@ node main.js --class=570714
 # Force refresh the curriculum cache
 node main.js --refresh-curriculum
 ```
+
+---
+
+## 🎓 BITS Pilani (Coursera BSc Computer Science)
+
+SAAB now supports auto-solving assignments, exams, and quizzes across your **BITS Pilani BSc Computer Science** degree on Coursera!
+
+```bash
+# Run BITS Coursera degree auto-solver (live submit)
+npm run start:bits
+# Or
+node main.js --bits
+
+# Preview mode (solves questions without submitting)
+npm run start:bits:dry-run
+# Or
+node main.js --bits --dry-run
+
+# Target a specific course
+node main.js --bits --course="network-programming"
+
+# Target a specific assignment directly
+node main.js --bits --assignment="https://www.coursera.org/learn/network-programming-client-server-programming/assignment-submission/QfWYP/tracing-a-simple-user-program/attempt"
+
+# Run DOM tests to verify Coursera selectors against real snapshot
+npm run test:bits
+```
+
+**Features:**
+- Automatic course discovery from BITS degree home (`https://www.coursera.org/degrees/bachelor-of-science-computer-science-bits/home`).
+- Full module outline crawling (expands accordions and drawers automatically).
+- Status filtering: skips completed (`✓`) and locked (`🔒`) assignments, solves all pending ones.
+- Automatic cover page resume/start button clicking.
+- Academic integrity checkpoint acknowledgment ("I understand").
+- Extracts single-choice (radio) and multi-select (checkbox) questions with full CML markup parsing.
+- Automated Coursera Honor Code agreement signing.
+- Live submission with confirmation dialog handling and grading screen detection.
 
 ---
 

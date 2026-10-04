@@ -9,6 +9,9 @@
     "start:mcq": "node main.js --only-mcq",
     "start:labs": "node main.js --only-labs",
     "start:skip-labs": "node main.js --skip-labs",
+    "start:bits": "node main.js --bits",
+    "start:bits:dry-run": "node main.js --bits --dry-run",
+    "test:bits": "node test_bits_dom.js",
     "dry-run": "node main.js --dry-run",
     "dry-run:mcq": "node main.js --dry-run --only-mcq",
     "auth": "node auth.js"

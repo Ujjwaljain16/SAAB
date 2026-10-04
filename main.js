@@ -11,6 +11,7 @@ import { normalizeScalerUrl } from './scaler_url.js';
 import { loginToScaler } from './scaler_login.js';
 import fs from 'fs';
 import path from 'path';
+import { runBits } from './bits_main.js';
 
 let globalHaltRun = false;
 let globalHaltReason = '';
@@ -34,6 +35,7 @@ const SUBJECT_FILTER = process.argv.find(a => a.startsWith('--subject='))?.split
 const SKIP_LABS = process.argv.includes('--skip-labs') || process.env.SKIP_LABS === 'true';
 const ONLY_MCQ = process.argv.includes('--only-mcq') || process.env.ONLY_MCQ === 'true';
 const ONLY_LABS = process.argv.includes('--only-labs') || process.env.ONLY_LABS === 'true';
+const IS_BITS = process.argv.includes('--bits') || process.env.BITS === 'true';
 const RUN_STATE_PATH = path.join(process.cwd(), 'run-state.json');
 const SOLVE_CONCURRENCY = Math.max(1, Number(process.env.SOLVE_CONCURRENCY || 4));
 
@@ -452,6 +454,10 @@ async function detectProblemType(page) {
 }
 
 async function run() {
+  if (IS_BITS) {
+    return runBits();
+  }
+
   const runState = makeRunState();
   const metrics = createRunMetrics();
   const userDataDir = path.join(process.cwd(), 'temp_chrome_profile');
