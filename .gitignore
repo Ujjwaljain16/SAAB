@@ -15,4 +15,5 @@ dump_problem_dom.js
 api-endpoints.json
 curriculum-cache.json
 *.png
+!arch.png
 data/

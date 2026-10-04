@@ -10,8 +10,7 @@
     "start:skip-labs": "node main.js --skip-labs",
     "dry-run": "node main.js --dry-run",
     "dry-run:mcq": "node main.js --dry-run --only-mcq",
-    "auth": "node auth.js",
-    "discover": "node dom_discover.js"
+    "auth": "node auth.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
