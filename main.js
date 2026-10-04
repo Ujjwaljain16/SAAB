@@ -33,6 +33,7 @@ const CLASS_FILTER = process.argv.find(a => a.startsWith('--class='))?.split('='
 const SUBJECT_FILTER = process.argv.find(a => a.startsWith('--subject='))?.split('=')[1] || '';
 const SKIP_LABS = process.argv.includes('--skip-labs') || process.env.SKIP_LABS === 'true';
 const ONLY_MCQ = process.argv.includes('--only-mcq') || process.env.ONLY_MCQ === 'true';
+const ONLY_LABS = process.argv.includes('--only-labs') || process.env.ONLY_LABS === 'true';
 const RUN_STATE_PATH = path.join(process.cwd(), 'run-state.json');
 const SOLVE_CONCURRENCY = Math.max(1, Number(process.env.SOLVE_CONCURRENCY || 4));
 
@@ -626,6 +627,12 @@ async function run() {
             continue;
           }
 
+          if (ONLY_LABS && type !== 'lab' && type !== 'launcher' && type !== 'vscode') {
+            console.log(`  [Worker ${workerId}] ⏭️ Skipping non-lab problem (--only-labs active): ${problem.title}`);
+            log.push({ title: problem.title, result: 'skipped' });
+            continue;
+          }
+
           let problemContent = await extractProblemContent(page);
 
           if (type === 'lab' || type === 'launcher') {
@@ -756,6 +763,11 @@ async function run() {
           }
 
           if (type === 'mcq') {
+            if (ONLY_LABS) {
+              console.log(`  [Worker ${workerId}] ⏭️ Skipping MCQ (--only-labs active): ${problem.title}`);
+              log.push({ title: problem.title, result: 'skipped' });
+              continue;
+            }
             problemContent = await slurpMCQContext(page);
             console.log(`  [Worker ${workerId}] Solving MCQ: ${problem.title}`);
             const mcqResult = await solveMCQ(problemContent);
