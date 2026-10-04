@@ -19,25 +19,43 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
   console.log(`[BITS Handler] Mode: ${options.dryRun ? 'DRY-RUN (Preview Only)' : 'SUBMIT (Live Solving)'}`);
   console.log(`============================================================`);
 
-  // Ensure url ends with /attempt if not already
+  // Prepare navigation URL
   let targetUrl = assignmentUrl;
-  if (!targetUrl.includes('/attempt') && !targetUrl.includes('/exam/')) {
+  if (targetUrl.includes('/assignment-submission/') && !targetUrl.includes('/attempt')) {
     targetUrl = targetUrl.replace(/\/+$/, '') + '/attempt';
   }
 
   console.log(`[BITS Handler] Navigating to: ${targetUrl}`);
-  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: COURSERA_TIMEOUTS.PAGE_LOAD });
-  await page.waitForLoadState('networkidle').catch(() => {});
-  await DELAY(2500);
-
-  // 1. Check if we landed on a Cover Page (or need to click Start / Resume)
-  const coverActionBtn = page.locator(COURSERA_SEL.coverActionButton).first();
-  if (await coverActionBtn.isVisible().catch(() => false)) {
-    const btnText = (await coverActionBtn.innerText().catch(() => '')).trim();
-    console.log(`[BITS Handler] Cover page detected. Action button found: "${btnText}"`);
-    console.log(`[BITS Handler] Launching assignment attempt...`);
-    await coverActionBtn.click().catch(() => {});
+  try {
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: COURSERA_TIMEOUTS.PAGE_LOAD });
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await DELAY(2500);
+  } catch (navErr) {
+    console.log(`[BITS Handler] Navigation retry for ${targetUrl}: ${navErr.message}`);
+    await page.goto(targetUrl, { waitUntil: 'commit', timeout: 30000 }).catch(() => {});
     await DELAY(2000);
+  }
+
+  // 1. If on a team page, look for assignment start link/button or cover button
+  const launchSelectors = [
+    COURSERA_SEL.coverActionButton,
+    'a[href*="/assignment-submission/"]',
+    'a[href*="/attempt"]',
+    'button:has-text("Start")',
+    'button:has-text("Resume")',
+    'button:has-text("Go to assignment")',
+    'a:has-text("Start")',
+    'a:has-text("Resume")',
+    'a:has-text("Go to assignment")'
+  ].join(', ');
+
+  const launchBtn = page.locator(launchSelectors).first();
+  if (await launchBtn.isVisible().catch(() => false)) {
+    const btnText = (await launchBtn.innerText().catch(() => '')).trim();
+    console.log(`[BITS Handler] Launch/action element detected: "${btnText}"`);
+    console.log(`[BITS Handler] Launching assignment attempt...`);
+    await launchBtn.click().catch(() => {});
+    await DELAY(2500);
     await page.waitForLoadState('networkidle').catch(() => {});
   }
 

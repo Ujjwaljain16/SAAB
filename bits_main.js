@@ -5,7 +5,7 @@ import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { BITS_URLS } from './bits_config.js';
-import { discoverDegreeCourses, crawlCourseOutline } from './bits_crawler.js';
+import { discoverDegreeDashboard, crawlCourseOutline, ensureCourseraLoggedIn } from './bits_crawler.js';
 import { solveAndSubmitCourseraAssignment } from './bits_handler.js';
 import { solverStats } from './solver.js';
 
@@ -86,7 +86,7 @@ export async function runBits(options = {}) {
   try {
     // 1. Direct Assignment Mode
     if (ASSIGNMENT_ARG) {
-      console.log(`[BITS] Direct assignment mode requested.`);
+      console.log(`[BITS] Direct assignment mode requested: ${ASSIGNMENT_ARG}`);
       const result = await solveAndSubmitCourseraAssignment(page, ASSIGNMENT_ARG, { dryRun: DRY_RUN });
       runLog.push({ url: ASSIGNMENT_ARG, result });
       if (result.status === 'pass') metrics.solved++;
@@ -96,54 +96,40 @@ export async function runBits(options = {}) {
       return;
     }
 
-    // 2. Discover Courses
-    let targetCourses = [];
+    // 2. Discover Degree Dashboard & Deadlines
+    console.log(`[BITS] Scanning degree home dashboard for current courses & deadline feed...`);
+    const dashboard = await discoverDegreeDashboard(page, BITS_URLS.DEGREE_HOME);
+    metrics.coursesSeen = dashboard.courses.length;
+
+    let targetDeadlines = dashboard.pending;
+
+    // Filter by course if specified
     if (COURSE_ARG) {
-      if (COURSE_ARG.startsWith('http')) {
-        targetCourses = [{ name: 'Target Course', url: COURSE_ARG, slug: COURSE_ARG.split('/')[4] || 'course' }];
-      } else {
-        const allCourses = await discoverDegreeCourses(page, BITS_URLS.DEGREE_HOME);
-        targetCourses = allCourses.filter(
-          (c) => c.slug.toLowerCase().includes(COURSE_ARG.toLowerCase()) || c.name.toLowerCase().includes(COURSE_ARG.toLowerCase())
-        );
-      }
-    } else {
-      targetCourses = await discoverDegreeCourses(page, BITS_URLS.DEGREE_HOME);
+      targetDeadlines = targetDeadlines.filter((item) =>
+        item.course.toLowerCase().includes(COURSE_ARG.toLowerCase()) ||
+        item.url.toLowerCase().includes(COURSE_ARG.toLowerCase())
+      );
+      console.log(`[BITS] Filtered to ${targetDeadlines.length} assignment(s) matching course "${COURSE_ARG}".`);
     }
 
-    if (targetCourses.length === 0) {
-      console.log(`[BITS] No matching courses found to process.`);
-      return;
-    }
-
-    console.log(`\n[BITS] Ready to process ${targetCourses.length} course(s).`);
-
-    // 3. Process each course
-    for (const course of targetCourses) {
-      if (globalHaltRun) break;
-      metrics.coursesSeen++;
-
+    // 3. Process Pending Assignments from Deadlines Feed
+    if (targetDeadlines.length > 0) {
       console.log(`\n============================================================`);
-      console.log(`📘 Course [${metrics.coursesSeen}/${targetCourses.length}]: ${course.name}`);
+      console.log(`📅 Processing ${targetDeadlines.length} Upcoming Deadline Assignment(s)`);
       console.log(`============================================================`);
 
-      const outline = await crawlCourseOutline(page, course.url);
-      metrics.assignmentsSeen += outline.allItems.length;
-
-      if (outline.pending.length === 0) {
-        console.log(`[BITS] No pending assignments in this course. (Locked: ${outline.locked.length}, Completed: ${outline.completed.length})`);
-        continue;
-      }
-
-      console.log(`[BITS] Starting execution for ${outline.pending.length} pending assignment(s)...`);
-
-      for (const assignment of outline.pending) {
+      for (let i = 0; i < targetDeadlines.length; i++) {
         if (globalHaltRun) break;
+        const assignment = targetDeadlines[i];
+        metrics.assignmentsSeen++;
 
-        console.log(`\n▶ [BITS] Starting: "${assignment.title}"`);
+        console.log(`\n▶ [BITS ${i + 1}/${targetDeadlines.length}] "${assignment.title}"`);
+        console.log(`   Course: ${assignment.course} | Due: ${assignment.due}`);
+        console.log(`   URL:    ${assignment.url}`);
+
         try {
           const res = await solveAndSubmitCourseraAssignment(page, assignment.url, { dryRun: DRY_RUN });
-          runLog.push({ title: assignment.title, url: assignment.url, ...res });
+          runLog.push({ title: assignment.title, course: assignment.course, url: assignment.url, ...res });
 
           if (res.status === 'pass') metrics.solved++;
           else if (res.status === 'dry-run') metrics.dryRun++;
@@ -159,6 +145,57 @@ export async function runBits(options = {}) {
         }
 
         await DELAY(2000);
+      }
+    } else {
+      console.log(`[BITS] No pending deadline assignments found on dashboard.`);
+    }
+
+    // 4. If no pending deadline assignments or if specific course requested, crawl course modules
+    if (targetDeadlines.length === 0 && dashboard.courses.length > 0) {
+      console.log(`\n[BITS] Checking course module outlines for internal practice assignments/quizzes...`);
+      let coursesToCrawl = dashboard.courses;
+      if (COURSE_ARG) {
+        coursesToCrawl = coursesToCrawl.filter((c) =>
+          c.name.toLowerCase().includes(COURSE_ARG.toLowerCase()) ||
+          c.slug.toLowerCase().includes(COURSE_ARG.toLowerCase())
+        );
+      }
+
+      for (const course of coursesToCrawl) {
+        if (globalHaltRun) break;
+
+        console.log(`\n============================================================`);
+        console.log(`📘 Checking Course: ${course.name}`);
+        console.log(`============================================================`);
+
+        const outline = await crawlCourseOutline(page, course.url);
+        metrics.assignmentsSeen += outline.allItems.length;
+
+        if (outline.pending.length === 0) {
+          console.log(`[BITS] No pending internal assignments in ${course.name}.`);
+          continue;
+        }
+
+        for (const item of outline.pending) {
+          if (globalHaltRun) break;
+
+          console.log(`\n▶ [BITS Module Item] Starting: "${item.title}"`);
+          try {
+            const res = await solveAndSubmitCourseraAssignment(page, item.url, { dryRun: DRY_RUN });
+            runLog.push({ title: item.title, course: course.name, url: item.url, ...res });
+
+            if (res.status === 'pass') metrics.solved++;
+            else if (res.status === 'dry-run') metrics.dryRun++;
+            else if (res.status === 'skipped') metrics.skipped++;
+            else metrics.failed++;
+          } catch (err) {
+            console.error(`  ✗ Error solving "${item.title}":`, err.message);
+            metrics.failed++;
+            runLog.push({ title: item.title, url: item.url, status: 'fail', error: err.message });
+          }
+
+          await DELAY(2000);
+        }
       }
     }
   } finally {

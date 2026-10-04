@@ -4,6 +4,7 @@ session.json
 session.json.tmp
 *.tmp
 run-log.json
+bits-run-log.json
 run-state.json
 .solver-cache/
 temp_chrome_profile/
