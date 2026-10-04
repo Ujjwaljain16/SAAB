@@ -464,6 +464,8 @@ function isRetryableServerError(error) {
   const status = Number(error?.status || 0);
   if (status >= 500 && status < 600) return true;
   const msg = String(error?.message || '');
+  // Gemini returns this when responseMimeType:json produces an empty/safety-blocked response
+  if (/model output must contain either output text or tool calls/i.test(msg)) return true;
   return /high demand|temporar|service unavailable|timeout/i.test(msg);
 }
 
@@ -672,6 +674,7 @@ function loadAllCache() {
       const raw = fs.readFileSync(path.join(CACHE_DIR, file), 'utf-8');
       const parsed = JSON.parse(raw);
       if (parsed?.code) CACHE_MEMORY.set(file.replace('.json', ''), parsed.code);
+      if (typeof parsed?.bestOptionIndex === 'number') CACHE_MEMORY.set(file.replace('.json', ''), parsed);
     } catch {}
   }
 }
@@ -690,6 +693,43 @@ function writeCache(cacheKey, code, language) {
   } catch {
     // ignore cache write errors
   }
+}
+
+export function makeMCQCacheKey(problemContent) {
+  const normTitle = (problemContent.title || '').trim().replace(/\s+/g, ' ');
+  const normBody = (problemContent.body || '').trim().replace(/\s+/g, ' ');
+  const normOpts = (problemContent.options || [])
+    .map(o => `${o.index}:${(o.text || '').trim().replace(/\s+/g, ' ')}`)
+    .join('|');
+  const payload = `MCQ_V1\n${normTitle}\n${normBody}\n${normOpts}`;
+  return 'mcq_' + crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+export function readMCQCache(cacheKey) {
+  return CACHE_MEMORY.get(cacheKey) || null;
+}
+
+export function writeMCQCache(cacheKey, result) {
+  CACHE_MEMORY.set(cacheKey, result);
+  try {
+    ensureCacheDir();
+    const cachePath = path.join(CACHE_DIR, `${cacheKey}.json`);
+    fs.writeFileSync(cachePath, JSON.stringify({ ...result, updatedAt: new Date().toISOString() }, null, 2));
+  } catch {
+    // ignore cache write errors
+  }
+}
+
+let apiQueue = Promise.resolve();
+const MIN_API_SPACING_MS = Number(process.env.API_SPACING_MS || 2200);
+
+function paceApiCall() {
+  const current = apiQueue;
+  let release;
+  apiQueue = new Promise((res) => { release = res; });
+  return current.then(() => {
+    setTimeout(release, MIN_API_SPACING_MS);
+  });
 }
 
 export async function solve(questionText, testCases, language, options = {}) {
@@ -773,10 +813,12 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
       : buildRetryPrompt(prompt, previousFailureFeedback, modelAttempt, language, selectedLanguageLabel, requiredMethodNames, starterSignatures);
 
     for (let i = 0; i < CLIENTS.length; i++) {
-      const model = CLIENTS[i].getGenerativeModel({ model: "gemini-2.5-flash" });
+      const geminiModel = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
+      const model = CLIENTS[i].getGenerativeModel({ model: geminiModel });
       let result;
 
       try {
+        await paceApiCall();
         solverStats.geminiRequests += 1;
         result = await model.generateContent({
           contents: [{ role: 'user', parts: [{ text: attemptPrompt }] }],
@@ -939,12 +981,22 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
   };
 }
 
+let nextGeminiKeyIndex = 0;
+
 export async function solveMCQ(problemContent) {
-  const prompt = `
-Solve the following multiple-choice question.
+  const cacheKey = makeMCQCacheKey(problemContent);
+  const cached = readMCQCache(cacheKey);
+  if (cached && typeof cached.bestOptionIndex === 'number') {
+    solverStats.cacheHits++;
+    console.log(`    [CACHE HIT] Loaded MCQ solution from disk: Option ${cached.bestOptionIndex + 1}`);
+    return cached;
+  }
+  solverStats.cacheMisses++;
+
+  const textPrompt = `Solve the following multiple-choice question.
 
 TITLE: ${problemContent.title}
-BODY: ${problemContent.body}
+BODY: ${(problemContent.body || '').trim() || '[Question is in the attached image — analyze it carefully]'}
 
 OPTIONS:
 ${problemContent.options.map(o => `[${o.index}] ${o.label}: ${o.text}`).join('\n')}
@@ -956,15 +1008,59 @@ Example output:
   "reasoning": "Because option C correctly describes..."
 }`;
 
-  if (CLIENTS.length > 0 && problemContent.images && problemContent.images.length > 0) {
-    // Has images, use Gemini vision (not fully implemented with images yet, but route to Gemini)
-    // For now we just pass text to Gemini
-    try {
-      const result = await model.generateContent(prompt);
-      const text = result.response.text();
-      return extractJsonBlock(text);
-    } catch (e) {
-      console.log('Gemini vision MCQ failed', e.message);
+  // Build multimodal contents — include screenshot if image-based question
+  const screenshot64 = problemContent.screenshotBase64 || null;
+  const buildContents = () => {
+    const parts = [{ text: textPrompt }];
+    if (screenshot64) {
+      parts.unshift({ inlineData: { mimeType: 'image/png', data: screenshot64 } });
+    }
+    return [{ role: 'user', parts }];
+  };
+
+  if (screenshot64) console.log('    [MCQ] Image-based question — using Gemini Vision multimodal input.');
+
+  if (CLIENTS.length > 0) {
+    const geminiModel = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
+    const maxTries = Math.max(6, CLIENTS.length * 3);
+
+    for (let tryCount = 0; tryCount < maxTries; tryCount++) {
+      const clientIdx = (nextGeminiKeyIndex++) % CLIENTS.length;
+      const client = CLIENTS[clientIdx];
+
+      try {
+        await paceApiCall();
+        const model = client.getGenerativeModel({
+          model: geminiModel,
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
+        });
+        solverStats.geminiRequests++;
+        const result = await model.generateContent({ contents: buildContents() });
+        const text = result.response.text();
+        const parsed = extractJsonBlock(text);
+        if (typeof parsed?.bestOptionIndex === 'number') {
+          writeMCQCache(cacheKey, parsed);
+          return parsed;
+        }
+      } catch (e) {
+        const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(e.message || '');
+        if (is429) {
+          solverStats.rateLimits++;
+          if (isDailyQuotaExceeded(e)) { console.log(`    Gemini MCQ key ${clientIdx + 1} daily quota exceeded.`); continue; }
+          const waitMs = Math.min(2500 * (tryCount + 1), 12000);
+          console.log(`    Gemini MCQ key ${clientIdx + 1} rate-limited. Waiting ${waitMs / 1000}s...`);
+          await new Promise(r => setTimeout(r, waitMs));
+          continue;
+        }
+        if (isRetryableServerError(e)) {
+          solverStats.serverErrors++;
+          const waitMs = Math.min(3000 * (tryCount + 1), 12000);
+          console.log(`    Gemini MCQ retryable error (key ${clientIdx + 1}): retrying in ${waitMs / 1000}s...`);
+          await new Promise(r => setTimeout(r, waitMs));
+          continue;
+        }
+        console.log('    Gemini MCQ solver error:', e.message?.slice(0, 120));
+      }
     }
   }
 
@@ -973,10 +1069,14 @@ Example output:
     try {
       const gResult = await generateWithGroq(prompt, GROQ_MODEL, 2048, "application/json");
       if (gResult.ok) {
-        return extractJsonBlock(gResult.text);
+        const parsed = extractJsonBlock(gResult.text);
+        if (typeof parsed?.bestOptionIndex === 'number') {
+          writeMCQCache(cacheKey, parsed);
+          return parsed;
+        }
       }
     } catch(e) {
-      console.log('Groq JSON fallback failed', e);
+      console.log('    Groq JSON fallback failed:', e.message || e);
     }
   }
 
@@ -984,6 +1084,15 @@ Example output:
 }
 
 export async function solveWorkspace(problemContent, workspaceMap) {
+  // If workspace is just stub placeholder files, return empty without calling AI
+  const isStub = Object.values(workspaceMap || {}).every(content =>
+    typeof content === 'string' && content.includes('TODO: Implement workspace extraction')
+  );
+  if (isStub) {
+    console.log('    [SOLVER] Workspace files are stubs. Skipping LLM generation to avoid burning quota.');
+    return { reasoning: 'Stub workspace', fileMap: {} };
+  }
+
   const prompt = `
 You are an expert backend LLD developer. Modify the files in this workspace to solve the given problem.
 
@@ -1007,26 +1116,30 @@ Keep non-modified files UNCHANGED (do not include them in fileMap).
 `;
 
   if (CLIENTS.length > 0) {
-    const modelName = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
-    let attempts = 0;
-    while (attempts < 2) {
+    const modelName = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
+    for (let tryCount = 0; tryCount < Math.max(2, CLIENTS.length); tryCount++) {
+      const clientIdx = (nextGeminiKeyIndex++) % CLIENTS.length;
+      const client = CLIENTS[clientIdx];
       try {
-        const model = CLIENTS[0].getGenerativeModel({ model: modelName, generationConfig: { responseMimeType: "application/json" } });
+        await paceApiCall();
+        const model = client.getGenerativeModel({ model: modelName, generationConfig: { responseMimeType: "application/json" } });
         solverStats.geminiRequests++;
         const result = await model.generateContent(prompt);
         const text = result.response.text();
         return extractJsonBlock(text);
       } catch(e) {
-        attempts++;
         const errMsg = e.message || String(e);
-        console.log(`    Gemini Workspace attempt ${attempts} failed: ${errMsg.slice(0, 100)}...`);
-        
-        if (errMsg.includes('429') || errMsg.includes('quota')) {
-          console.log(`    Gemini rate limited. Shifting to Groq fallback...`);
-          break; // Exit Gemini loop to hit Groq block below
+        console.log(`    Gemini Workspace key ${clientIdx + 1} failed: ${errMsg.slice(0, 100)}...`);
+        const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(errMsg);
+        if (is429) {
+          if (isDailyQuotaExceeded(e)) continue;
+          await new Promise(r => setTimeout(r, 2000 * (tryCount + 1)));
+          continue;
         }
-        if (attempts >= 2) break;
-        await new Promise(r => setTimeout(r, 2000));
+        if (isRetryableServerError(e)) {
+          await new Promise(r => setTimeout(r, 2500 * (tryCount + 1)));
+          continue;
+        }
       }
     }
   }
@@ -1049,3 +1162,125 @@ Keep non-modified files UNCHANGED (do not include them in fileMap).
 
   return { reasoning: 'failed', fileMap: {} };
 }
+
+function makeLabCacheKey(title, statement) {
+  return crypto.createHash('sha256').update(`LAB:${title}\n${statement}`).digest('hex');
+}
+
+function readLabCache(cacheKey) {
+  try {
+    const p = path.join(CACHE_DIR, `lab_${cacheKey}.json`);
+    if (fs.existsSync(p)) {
+      return JSON.parse(fs.readFileSync(p, 'utf-8'));
+    }
+  } catch {}
+  return null;
+}
+
+function writeLabCache(cacheKey, data) {
+  try {
+    const p = path.join(CACHE_DIR, `lab_${cacheKey}.json`);
+    fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
+  } catch {}
+}
+
+export async function solveTerminalLab(problemTitle, problemStatement) {
+  const cacheKey = makeLabCacheKey(problemTitle, problemStatement);
+  const cached = readLabCache(cacheKey);
+  if (cached && Array.isArray(cached.commands) && cached.commands.length > 0) {
+    console.log(`    [CACHE HIT] Loaded Terminal Lab solution from disk: ${problemTitle}`);
+    return cached;
+  }
+
+  const prompt = `You are an expert DevOps engineer and Linux system administrator.
+Solve this hands-on Linux/DevOps container lab problem for Scaler Academy.
+
+Problem Title: ${problemTitle}
+Problem Description & Requirements:
+${problemStatement}
+
+You MUST return a JSON object with this exact schema:
+{
+  "commands": [
+    "command 1",
+    "command 2"
+  ],
+  "reasoning": "brief explanation"
+}
+
+Rules:
+1. Provide the exact bash commands to run in the terminal to fulfill all requirements.
+2. File creation must be non-interactive (e.g. cat << 'EOF' > /home/user/... EOF).
+3. If files need execution permissions, include chmod +x.
+4. If directories are needed, include mkdir -p.
+5. Return ONLY the JSON object. Do not include markdown or explanations outside the JSON.`;
+
+  if (CLIENTS.length > 0) {
+    const geminiModel = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
+    const maxTries = Math.max(4, CLIENTS.length * 2);
+
+    for (let tryCount = 0; tryCount < maxTries; tryCount++) {
+      const clientIdx = (nextGeminiKeyIndex++) % CLIENTS.length;
+      const client = CLIENTS[clientIdx];
+
+      try {
+        await paceApiCall();
+        const model = client.getGenerativeModel({
+          model: geminiModel,
+          generationConfig: {
+            responseMimeType: "application/json",
+            temperature: 0.1
+          }
+        });
+        solverStats.geminiRequests++;
+        const result = await model.generateContent(prompt);
+        const text = result.response.text();
+        const parsed = extractJsonBlock(text);
+        if (Array.isArray(parsed?.commands) && parsed.commands.length > 0) {
+          writeLabCache(cacheKey, parsed);
+          return parsed;
+        }
+      } catch (e) {
+        const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(e.message || '');
+        if (is429) {
+          solverStats.rateLimits++;
+          if (isDailyQuotaExceeded(e)) {
+            console.log(`    Gemini key ${clientIdx + 1} daily quota exhausted, skipping key.`);
+            continue;
+          }
+          const waitMs = Math.min(2500 * (tryCount + 1), 10000);
+          console.log(`    Gemini key ${clientIdx + 1} rate-limited (429). Waiting ${waitMs / 1000}s...`);
+          await new Promise(r => setTimeout(r, waitMs));
+          continue;
+        }
+        if (isRetryableServerError(e)) {
+          solverStats.serverErrors++;
+          const waitMs = Math.min(3000 * (tryCount + 1), 12000);
+          console.log(`    Gemini Lab retryable error (key ${clientIdx + 1}): "${e.message?.slice(0, 80)}". Retrying in ${waitMs / 1000}s...`);
+          await new Promise(r => setTimeout(r, waitMs));
+          continue;
+        }
+        console.log('    Gemini Lab solver error:', e.message?.slice(0, 120));
+      }
+    }
+  }
+
+  // Fallback to Groq if available
+  if (GROQ_API_KEY) {
+    try {
+      const gResult = await generateWithGroq(prompt, GROQ_MODEL, 2048, "application/json");
+      if (gResult.ok) {
+        const parsed = extractJsonBlock(gResult.text);
+        if (Array.isArray(parsed?.commands) && parsed.commands.length > 0) {
+          writeLabCache(cacheKey, parsed);
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.log('    Groq Lab fallback failed:', e.message || e);
+    }
+  }
+
+  return { commands: [], reasoning: 'Failed to generate commands' };
+}
+

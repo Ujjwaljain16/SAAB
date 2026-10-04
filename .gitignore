@@ -1,6 +1,8 @@
 node_modules/
 .env
 session.json
+session.json.tmp
+*.tmp
 run-log.json
 run-state.json
 .solver-cache/

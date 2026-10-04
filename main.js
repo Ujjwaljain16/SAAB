@@ -5,17 +5,64 @@ import { solve, solverStats, looksTruncated, solveMCQ, solveWorkspace } from './
 import { injectAndSubmit } from './injector.js';
 import { slurpWorkspaceContext, injectWorkspaceContext, waitForWorkspaceReady } from './workspace_manager.js';
 import { slurpMCQContext, injectMCQAnswer } from './mcq_handler.js';
+import { solveAndSubmitLab } from './lab_handler.js';
 import { SEL } from './config.js';
 import { normalizeScalerUrl } from './scaler_url.js';
 import { loginToScaler } from './scaler_login.js';
 import fs from 'fs';
 import path from 'path';
 
+let globalHaltRun = false;
+let globalHaltReason = '';
+
+process.on('SIGINT', () => {
+  console.log('\n[SIGINT] Received interrupt signal. Halting gracefully after current operations to save state...');
+  globalHaltRun = true;
+  globalHaltReason = 'Manually interrupted (SIGINT)';
+});
+
+process.on('SIGTERM', () => {
+  console.log('\n[SIGTERM] Received termination signal. Halting gracefully after current operations to save state...');
+  globalHaltRun = true;
+  globalHaltReason = 'Terminated (SIGTERM)';
+});
+
 const DELAY = (ms) => new Promise(r => setTimeout(r, ms));
 const DRY_RUN = process.argv.includes('--dry-run') && !process.argv.includes('--submit');
 const CLASS_FILTER = process.argv.find(a => a.startsWith('--class='))?.split('=')[1] || '';
+const SUBJECT_FILTER = process.argv.find(a => a.startsWith('--subject='))?.split('=')[1] || '';
+const SKIP_LABS = process.argv.includes('--skip-labs') || process.env.SKIP_LABS === 'true';
+const ONLY_MCQ = process.argv.includes('--only-mcq') || process.env.ONLY_MCQ === 'true';
 const RUN_STATE_PATH = path.join(process.cwd(), 'run-state.json');
 const SOLVE_CONCURRENCY = Math.max(1, Number(process.env.SOLVE_CONCURRENCY || 4));
+
+class AsyncMutex {
+  constructor() {
+    this._queue = [];
+    this._locked = false;
+  }
+
+  async acquire() {
+    if (!this._locked) {
+      this._locked = true;
+      return () => this.release();
+    }
+    return new Promise((resolve) => {
+      this._queue.push(resolve);
+    }).then(() => () => this.release());
+  }
+
+  release() {
+    if (this._queue.length > 0) {
+      const next = this._queue.shift();
+      next();
+    } else {
+      this._locked = false;
+    }
+  }
+}
+
+const workspaceMutex = new AsyncMutex();
 
 function createRunMetrics() {
   return {
@@ -74,14 +121,17 @@ function loadRunState() {
 }
 
 function saveRunState(state) {
-  const payload = {
-    version: 1,
-    updatedAt: new Date().toISOString(),
-    completedClasses: state.completedClasses,
-    completedProblems: state.completedProblems
-  };
-
-  fs.writeFileSync(RUN_STATE_PATH, JSON.stringify(payload, null, 2));
+  try {
+    const payload = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      completedClasses: state.completedClasses,
+      completedProblems: state.completedProblems
+    };
+    const tmp = RUN_STATE_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2));
+    fs.renameSync(tmp, RUN_STATE_PATH);
+  } catch {}
 }
 
 function makeRunState() {
@@ -109,33 +159,11 @@ function markProblemComplete(runState, problemKey) {
   persistRunState(runState);
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
-
-  async function runWorker() {
-    while (true) {
-      const currentIndex = nextIndex;
-      nextIndex += 1;
-      if (currentIndex >= items.length) {
-        return;
-      }
-
-      results[currentIndex] = await worker(items[currentIndex], currentIndex);
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => runWorker());
-  await Promise.all(workers);
-  return results;
-}
-
 function previewCode(code, maxLines = 18) {
   const lines = (code || '').split(/\r?\n/);
   if (lines.length <= maxLines) {
     return code;
   }
-
   return `${lines.slice(0, maxLines).join('\n')}\n... [truncated ${lines.length - maxLines} lines]`;
 }
 
@@ -145,15 +173,12 @@ function classifyFailureFeedback(text) {
   if (value.includes('incompatible types') || value.includes('cannot find symbol') || value.includes('method ') || value.includes('signature')) {
     return 'Compilation/signature mismatch. Preserve the starter method names, parameter types, and return types exactly.';
   }
-
   if (value.includes('wrong answer') || value.includes('expected') || value.includes('actual')) {
     return 'Wrong answer. Keep the same scaffold and fix only the logic difference shown in feedback.';
   }
-
   if (value.includes('runtime error') || value.includes('exception') || value.includes('nullpointer') || value.includes('indexoutofbounds')) {
     return 'Runtime error. Add safety checks and handle edge cases without changing required signatures.';
   }
-
   if (value.includes('time limit exceeded') || value.includes('tle')) {
     return 'Time limit issue. Optimize the current approach without changing the required API.';
   }
@@ -169,7 +194,6 @@ function resolveTargetLanguage(subject) {
   if (/programming using js/i.test(subject)) {
     return 'JavaScript';
   }
-
   return 'Java';
 }
 
@@ -200,14 +224,12 @@ async function getCurrentSelectedLanguageLabel(page) {
     const input = document.querySelector(inputSelector);
     if (!input) return '';
     const selectRoot = input.closest('[class*="select"]') || input.parentElement;
-    const text = (selectRoot?.innerText || '').replace(/\s+/g, ' ').trim();
-    return text;
+    return (selectRoot?.innerText || '').replace(/\s+/g, ' ').trim();
   }, SEL.problemLanguageInput).catch(() => '');
 }
 
 async function selectProblemLanguage(page, targetLanguage) {
   const languageInput = page.locator(SEL.problemLanguageInput).first();
-
   if ((await languageInput.count()) === 0) {
     return false;
   }
@@ -215,23 +237,26 @@ async function selectProblemLanguage(page, targetLanguage) {
   const target = normalizeLanguageName(targetLanguage);
   if (!target) return false;
 
+  const current = await getCurrentSelectedLanguage(page);
+  if (current === target) {
+    return true;
+  }
+
   const desired = /java/i.test(targetLanguage) ? 'Java Array' : targetLanguage;
 
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    const current = await getCurrentSelectedLanguage(page);
-    if (current === target) {
-      return true;
-    }
-
+  for (let attempt = 1; attempt <= 3; attempt++) {
     await languageInput.click({ force: true }).catch(() => {});
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
-    await page.keyboard.type(desired, { delay: 30 }).catch(() => {});
+    await page.keyboard.type(desired, { delay: 15 }).catch(() => {});
     await page.keyboard.press('Enter').catch(() => {});
     if (/java/i.test(targetLanguage)) {
-      // One extra Enter helps pick first Java variant option when dropdown has multiple Java runtimes.
       await page.keyboard.press('Enter').catch(() => {});
     }
-    await page.waitForTimeout(900);
+    await page.waitForTimeout(300);
+    const updated = await getCurrentSelectedLanguage(page);
+    if (updated === target) {
+      return true;
+    }
   }
 
   return (await getCurrentSelectedLanguage(page)) === target;
@@ -239,7 +264,7 @@ async function selectProblemLanguage(page, targetLanguage) {
 
 async function extractProblemContent(page) {
   const title = normalizeProblemTitle(await page.title());
-  const rawBody = await page.locator('body').innerText();
+  const rawBody = await page.locator('body').innerText().catch(() => '');
 
   let body = rawBody || '';
   const start = body.search(/problem\s+description/i);
@@ -266,10 +291,7 @@ async function extractProblemContent(page) {
   body = body.slice(0, cutAt).trim();
   body = body.replace(/\n{3,}/g, '\n\n').slice(0, 12000);
 
-  return {
-    title,
-    body,
-  };
+  return { title, body };
 }
 
 function extractTestCases(body) {
@@ -283,8 +305,7 @@ async function extractEditorStarterCode(page) {
     if (window.monaco?.editor?.getModels) {
       const models = window.monaco.editor.getModels();
       if (models && models.length > 0) {
-        const value = models[0].getValue();
-        return value || '';
+        return models[0].getValue() || '';
       }
     }
     return '';
@@ -343,31 +364,44 @@ async function collectQuestionTabs(page) {
 }
 
 async function getProblemSolveState(page) {
-  const state = await page.evaluate(() => {
-    const candidates = Array.from(document.querySelectorAll('span,div,p,strong'))
-      .map((el) => (el.textContent || '').trim())
-      .filter(Boolean);
-
-    const hasUnsolved = candidates.some((t) => /^unsolved$/i.test(t));
-    const hasSolved = candidates.some((t) => /^solved$/i.test(t));
-
-    if (hasUnsolved) return 'unsolved';
-    if (hasSolved) return 'solved';
-    return 'unknown';
+  return page.evaluate(() => {
+    const headingEl = document.querySelector('.cr-p-heading .status-tag-2, .cr-p-heading [class*="status"]');
+    if (headingEl) {
+      const text = (headingEl.textContent || '').trim().toLowerCase();
+      if (text.includes('solved') && !text.includes('unsolved')) return 'solved';
+      if (text.includes('unsolved')) return 'unsolved';
+      if (text.includes('attempted')) return 'attempted';
+    }
+    const hasSolvedBadge = document.querySelector('.cr-p-heading .status-tag-2--success') != null;
+    if (hasSolvedBadge) return 'solved';
+    return 'unsolved';
   }).catch(() => 'unknown');
-
-  return state;
 }
 
 function buildProblemsUrl(assignmentUrl) {
   const url = new URL(assignmentUrl);
   url.pathname = url.pathname.replace(/\/assignment\/?$/i, '/assignment/problems');
-
   if (!url.searchParams.has('navref')) {
     url.searchParams.set('navref', 'cl_tt_nv');
   }
-
   return url.toString();
+}
+
+async function safeGoto(page, url, options = {}) {
+  const opts = {
+    waitUntil: 'domcontentloaded',
+    timeout: 60000,
+    ...options
+  };
+  try {
+    return await page.goto(url, opts);
+  } catch (err) {
+    if (err.name === 'TimeoutError' || err.message?.includes('Timeout') || err.message?.includes('timeout')) {
+      console.log(`Navigation to ${url.slice(0, 60)} timed out. Retrying with commit...`);
+      return await page.goto(url, { ...opts, waitUntil: 'commit', timeout: 45000 });
+    }
+    throw err;
+  }
 }
 
 function isLoginUrl(url) {
@@ -378,29 +412,42 @@ async function ensureLoggedIn(page, ctx, reason = 'session check') {
   if (!isLoginUrl(page.url())) {
     return;
   }
-
   console.log(`Session expired (${reason}). Re-authenticating...`);
   await loginToScaler(page);
   await ctx.storageState({ path: 'session.json' }).catch(() => {});
 }
 
-
 async function detectProblemType(page) {
-    const isMcq = await page.locator('input[type="radio"], input[type="checkbox"]').count() > 0;
-    if (isMcq) return 'mcq';
-    
-    // Look for Launch button OR the actual workspace IDE frame if it loads automatically
-    const isLauncher = await page.evaluate(() => {
-       if (document.querySelector('#vscode-ide, iframe[allow*="clipboard-read"], .EditorLayout-module_container__Uxq1a, .code-editor-layer')) {
-           return true; 
-       }
-       const btns = Array.from(document.querySelectorAll('button, a'));
-       return btns.some(b => (b.innerText||'').match(/open ide|launch|vs\s*code/i));
-    });
-    
-    if (isLauncher) return 'launcher';
+  // Wait briefly for React problem controls to mount
+  await page.waitForFunction(() => {
+    const isMcq = document.querySelectorAll('.cr-multiple-choice, input[type="radio"], input[type="checkbox"]').length > 0;
+    const hasMonaco = document.querySelector('.monaco-editor') != null;
+    const btns = Array.from(document.querySelectorAll('button, a'));
+    const hasLauncher = btns.some(b => (b.innerText || '').match(/open ide|launch lab|launch|vs\s*code/i));
+    return isMcq || hasMonaco || hasLauncher;
+  }, { timeout: 5000 }).catch(() => {});
 
-    return 'coding';
+  const isMcq = (await page.locator('.cr-multiple-choice, input[type="radio"], input[type="checkbox"]').count()) > 0;
+  if (isMcq) return 'mcq';
+
+  // Check for VS Code IDE (open IDE button without Maxwell/terminal markers)
+  const isVSCode = await page.evaluate(() => {
+    if (document.querySelector('#vscode-ide, .EditorLayout-module_container__Uxq1a, .code-editor-layer')) return true;
+    const btns = Array.from(document.querySelectorAll('button, a, span, div'));
+    return btns.some(b => (b.innerText || '').trim().match(/^open\s*ide$|vs\s*code/i));
+  }).catch(() => false);
+  if (isVSCode) return 'vscode';
+
+  // Check for Maxwell terminal labs (Launch Lab button or maxwell iframe)
+  const isLab = await page.evaluate(() => {
+    if (document.querySelector('iframe[src*="maxwell"], iframe[allow*="clipboard-read"]')) return true;
+    if (document.querySelector('.LaunchButton-module_btn__o1LoJ')) return true;
+    const btns = Array.from(document.querySelectorAll('button, a, span, div'));
+    return btns.some(b => (b.innerText || '').trim().match(/^launch\s*(lab)?$/i));
+  }).catch(() => false);
+  if (isLab) return 'lab';
+
+  return 'coding';
 }
 
 async function run() {
@@ -414,7 +461,7 @@ async function run() {
     process.exit(1);
   }
 
-  console.log(`Launching Chrome with saved Scaler session... Mode: ${DRY_RUN ? 'dry-run' : 'submit'}`);
+  console.log(`Launching Chrome with high-speed Page Pool (${SOLVE_CONCURRENCY} workers)... Mode: ${DRY_RUN ? 'dry-run' : 'submit'}${ONLY_MCQ ? ' [ONLY-MCQ]' : ''}${SKIP_LABS ? ' [SKIP-LABS]' : ''}`);
 
   const ctx = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
@@ -431,350 +478,425 @@ async function run() {
     ],
     viewport: { width: 1280, height: 720 }
   });
+
+  // High-speed route optimization: block tracking, analytics, ads, and heavy media
+  await ctx.route('**/*', (route) => {
+    const req = route.request();
+    const url = req.url();
+    if (/google-analytics|googletagmanager|mixpanel|datadoghq|hotjar|sentry\.io|clarity\.ms|segment\.io|amplitude\.com|fullstory|facebook\.net|doubleclick/i.test(url)) {
+      return route.abort();
+    }
+    if (['media'].includes(req.resourceType()) || /\.(mp4|webm|avi|mov|mp3|wav|ogg)(\?.*)?$/i.test(url)) {
+      return route.abort();
+    }
+    return route.continue();
+  });
+
   const log = [];
-  let haltRun = false;
-  let haltReason = '';
+
   try {
-  const page = ctx.pages()[0] || await ctx.newPage();
+    const mainPage = ctx.pages()[0] || await ctx.newPage();
 
-  // Quick check if we are actually logged in on the curriculum page
-  await page.goto(normalizeScalerUrl('https://www.scaler.com/academy/mentee-dashboard/core-curriculum/'), { waitUntil: 'domcontentloaded' });
-  await ensureLoggedIn(page, ctx, 'initial dashboard open');
+    console.log('Checking session on curriculum dashboard...');
+    await safeGoto(mainPage, normalizeScalerUrl('https://www.scaler.com/academy/mentee-dashboard/core-curriculum/'));
+    await ensureLoggedIn(mainPage, ctx, 'initial dashboard open');
 
-  const queue = await getQueue(page);
-  let filteredQueue = queue.filter(({ classUrl }) => !runState.completedClasses.has(classUrl));
-  if (CLASS_FILTER) {
-    filteredQueue = filteredQueue.filter(({ classUrl }) => classUrl.includes(CLASS_FILTER));
-    console.log(`--class filter active: "${CLASS_FILTER}", ${filteredQueue.length} class(es) matched.`);
-  }
-  if (queue.length === 0) {
-    console.log("No pending questions found. Exiting.");
-    await ctx.close();
-    return;
-  }
-
-  if (filteredQueue.length !== queue.length) {
-    console.log(`Skipping ${queue.length - filteredQueue.length} already completed classes from checkpoint.`);
-    metrics.classesSkipped = queue.length - filteredQueue.length;
-  }
-
-
-  for (const { classUrl, pending, subject } of filteredQueue) {
-    metrics.classesSeen += 1;
-    console.log(`Navigating to class: ${classUrl} \nPending: ${pending}`);
-    await page.goto(classUrl, { waitUntil: 'domcontentloaded' });
-    await ensureLoggedIn(page, ctx, 'class navigation');
-    
-    // Switch to the assignment page using the real tab link Scaler renders.
-    const assignmentTab = page.locator(SEL.assignmentTab).first();
-    await assignmentTab.waitFor({ state: 'visible', timeout: 15000 }).catch(() => console.log("Failed to find 'Assignment' tab."));
-
-    let assignmentUrl = normalizeScalerUrl(`${classUrl}/assignment?navref=cl_tb_br`);
-    const assignmentHref = await assignmentTab.getAttribute('href').catch(() => null);
-    if (assignmentHref) {
-      assignmentUrl = normalizeScalerUrl(assignmentHref.startsWith('http') ? assignmentHref : `https://www.scaler.com${assignmentHref}`);
-    } else {
-      await assignmentTab.click().catch(() => {});
+    const queue = await getQueue(mainPage);
+    let filteredQueue = queue.filter(({ classUrl }) => !runState.completedClasses.has(classUrl));
+    if (SUBJECT_FILTER) {
+      filteredQueue = filteredQueue.filter(({ subject }) => (subject || '').toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
+      console.log(`--subject filter active: "${SUBJECT_FILTER}", ${filteredQueue.length} class(es) matched.`);
+    }
+    if (CLASS_FILTER) {
+      filteredQueue = filteredQueue.filter(({ classUrl }) => classUrl.includes(CLASS_FILTER));
+      console.log(`--class filter active: "${CLASS_FILTER}", ${filteredQueue.length} class(es) matched.`);
     }
 
-    const problemsUrl = buildProblemsUrl(assignmentUrl);
-    await page.goto(problemsUrl, { waitUntil: 'domcontentloaded' });
-    await ensureLoggedIn(page, ctx, 'assignment problems navigation');
-    await page.waitForSelector('tr.table__row a.me-cr-classroom-url.me-cr-problem-actions__btn[href*="/assignment/problems/"]', { timeout: 15000 }).catch(() => console.log('Problem rows not ready yet.'));
-
-    const questionTabs = await collectQuestionTabs(page);
-    const problems = questionTabs.length > 0 ? questionTabs : await collectAssignmentProblems(page);
-
-    if (problems.length === 0) {
-      console.log('No assignment problems found on this page.');
-      continue;
+    if (queue.length === 0) {
+      console.log("No pending questions found. Exiting.");
+      await ctx.close();
+      return;
     }
 
-    const problemJobs = [];
-    for (const problem of problems) {
-      const solveUrl = problem.solveUrl.startsWith('http') ? problem.solveUrl : `https://www.scaler.com${problem.solveUrl}`;
-      if (runState.completedProblems.has(solveUrl)) {
-        console.log(`    Already completed from checkpoint: ${problem.title}`);
-        log.push({ title: problem.title, result: 'skipped' });
-        metrics.problemsSkipped += 1;
-        continue;
-      }
+    if (filteredQueue.length !== queue.length) {
+      console.log(`Skipping ${queue.length - filteredQueue.length} already completed classes from checkpoint.`);
+      metrics.classesSkipped = queue.length - filteredQueue.length;
+    }
 
-      console.log(`\n  Reading: ${problem.title}`);
-      metrics.problemsRead += 1;
-      await page.goto(normalizeScalerUrl(solveUrl), { waitUntil: 'domcontentloaded' });
-      await ensureLoggedIn(page, ctx, 'problem page navigation');
-      await page.waitForLoadState('networkidle').catch(() => {});
+    for (const { classUrl, pending, subject } of filteredQueue) {
+      if (globalHaltRun) break;
 
-      const solveState = await getProblemSolveState(page);
-      if (solveState === 'solved') {
-        console.log(`    Already solved. Skipping.`);
-        log.push({ title: problem.title, result: 'skipped' });
-        markProblemComplete(runState, solveUrl);
-        await page.goto(normalizeScalerUrl(problemsUrl), { waitUntil: 'domcontentloaded' });
-        await ensureLoggedIn(page, ctx, 'return to assignment problems');
-        await page.waitForLoadState('domcontentloaded').catch(() => {});
-        continue;
-      }
+      metrics.classesSeen += 1;
+      console.log(`\n============================================================`);
+      console.log(`Processing class: ${classUrl}\nPending: ${pending}\nSubject: ${subject}`);
+      console.log(`============================================================`);
 
-      const targetLanguage = resolveTargetLanguage(subject);
-      const type = await detectProblemType(page);
-      console.log(`    Detected problem type: ${type}`);
-      
-      let problemContent = await extractProblemContent(page);
-      let starterCode = '';
+      await safeGoto(mainPage, classUrl);
+      await ensureLoggedIn(mainPage, ctx, 'class navigation');
 
-      if (type === 'launcher') {
-        console.log('    Workspace detected. Executing immediately to prevent session loss...');
-        let result = 'fail';
-        const launchBtn = page.locator('button:has-text("Open IDE"), button:has-text("Launch"), a:has-text("Open IDE"), a:has-text("Launch"), div.launch-btn, span:has-text("Launch"), .LaunchButton-module_btn__o1LoJ').first();
-        if (await launchBtn.isVisible().catch(()=>false)) {
-            console.log('    Clicking Launch button...');
-            await launchBtn.click();
-            await page.waitForTimeout(3000); // Wait for potential active workspace warning
-            
-            const warningBtn = page.locator('a.LabWarning-module_endLabButton__CiMv5, a:has-text("Save and Open New Workspace")').first();
-            if (await warningBtn.isVisible().catch(()=>false)) {
-                console.log('    Previous workspace active. Closing it to open new one...');
-                await warningBtn.click();
-            }
-        }
-        
-        console.log('    Waiting for IDE to spin up (this could take minutes)...');
-        await waitForWorkspaceReady(page, 300000).catch((e) => console.log('    ' + e.message));
-        
-        console.log('    Slurping workspace context...');
-        const workspaceMap = await slurpWorkspaceContext(page);
-        console.log(`    Found ${Object.keys(workspaceMap).length} source files. Solving...`);
-        
-        metrics.solveAttempts += 1;
-        const wResult = await solveWorkspace(problemContent, workspaceMap);
-        
-        if (wResult && wResult.fileMap) {
-            if (!DRY_RUN) {
-                console.log('    Injecting code into workspace...');
-                await injectWorkspaceContext(page, wResult.fileMap);
-                console.log('    Saved workspace modifications. Validating...');
-                
-                try {
-                    const outSubmit = page.locator('button:has-text("Run Tests"), button:has-text("Submit"), button:has-text("Save & Next")').first();
-                    if (await outSubmit.isVisible()) {
-                        await outSubmit.click();
-                        await page.waitForTimeout(5000);
-                        const fb = await page.locator('.me-cr-test-case-feedback').innerText().catch(()=>'');
-                        if (/success|correct/i.test(fb)) result = 'pass';
-                    } else {
-                        result = 'dry-run'; 
-                    }
-                } catch(e) { result = 'dry-run'; }
-            } else {
-                console.log(`    [AI Reasoning]: ${wResult.reasoning || 'Executed successfully'}`);
-                console.log(`    DRY-RUN workspace preview modifications:`);
-                for (const [fName, fCode] of Object.entries(wResult.fileMap)) {
-                    console.log(`\n--- ${fName} ---`);
-                    console.log(previewCode(fCode));
-                    console.log(`----------------------------------\n`);
-                }
-                result = 'dry-run';
-            }
-        }
-        
-        if (result === 'dry-run') metrics.problemsDryRun += 1;
-        if (result === 'pass') metrics.problemsSolved += 1;
-        if (!['pass', 'dry-run'].includes(result)) metrics.problemsFailed += 1;
+      const assignmentTab = mainPage.locator(SEL.assignmentTab).first();
+      await assignmentTab.waitFor({ state: 'visible', timeout: 10000 }).catch(() => console.log("Failed to find 'Assignment' tab."));
 
-        log.push({ title: problem.title, result });
-        const mark = result === 'pass' ? '✓' : (result === 'dry-run' ? '↺' : '✗');
-        console.log(`  ${mark} ${problem.title}`);
-        if (result === 'pass') markProblemComplete(runState, solveUrl);
-        
-        // Return to problems selection page cleanly
-        await page.goto(normalizeScalerUrl(problemsUrl), { waitUntil: 'domcontentloaded' });
-        await ensureLoggedIn(page, ctx, 'return to assignment problems');
-        await page.waitForLoadState('domcontentloaded').catch(() => {});
-        continue;
-      }
-
-      if (type === 'mcq') {
-        problemContent = await slurpMCQContext(page);
+      let assignmentUrl = normalizeScalerUrl(`${classUrl}/assignment?navref=cl_tb_br`);
+      const assignmentHref = await assignmentTab.getAttribute('href').catch(() => null);
+      if (assignmentHref) {
+        assignmentUrl = normalizeScalerUrl(assignmentHref.startsWith('http') ? assignmentHref : `https://www.scaler.com${assignmentHref}`);
       } else {
-        const languageSet = await selectProblemLanguage(page, targetLanguage);
-        if (!languageSet) {
-          console.log(`    Warning: could not confirm language switch to ${targetLanguage}.`);
-        }
-        const selectedLanguageLabel = await getCurrentSelectedLanguageLabel(page);
-        if (type !== 'mcq') {
-          starterCode = await extractEditorStarterCode(page);
-        }
+        await assignmentTab.click().catch(() => {});
       }
 
-      problemJobs.push({
-        title: problem.title,
-        solveUrl,
-        classUrl,
-        subject,
-        targetLanguage,
-        selectedLanguageLabel: type === 'mcq' ? 'MCQ' : await getCurrentSelectedLanguageLabel(page),
-        problemContent,
-        starterCode,
-        type
+      const problemsUrl = buildProblemsUrl(assignmentUrl);
+      await safeGoto(mainPage, problemsUrl);
+      await ensureLoggedIn(mainPage, ctx, 'assignment problems navigation');
+      await mainPage.waitForSelector('tr.table__row a[href*="/assignment/problems/"], a.cr-p-navigation-dock-item[href*="/assignment/problems/"]', { timeout: 12000 }).catch(() => {});
+
+      const tableProblems = await collectAssignmentProblems(mainPage);
+      const questionTabs = await collectQuestionTabs(mainPage);
+      const problems = tableProblems.length > 0 ? tableProblems : questionTabs;
+
+      if (problems.length === 0) {
+        console.log('No assignment problems found on this page.');
+        continue;
+      }
+
+      console.log(`Found ${problems.length} assignment problem(s). Initiating Page Pool workers...`);
+
+      // Filter unsolved
+      const pendingProblems = problems.filter((p) => {
+        const fullUrl = p.solveUrl.startsWith('http') ? p.solveUrl : `https://www.scaler.com${p.solveUrl}`;
+        return !runState.completedProblems.has(fullUrl);
       });
 
-      await page.goto(normalizeScalerUrl(problemsUrl), { waitUntil: 'domcontentloaded' });
-      await ensureLoggedIn(page, ctx, 'post-problem return');
-      await page.waitForLoadState('domcontentloaded').catch(() => {});
-    }
-
-    const solvedJobs = await mapWithConcurrency(problemJobs, SOLVE_CONCURRENCY, async (job) => {
-      if (job.type === 'launcher') return job; // solve sequentially inside iframe later
-      
-      console.log(`    Solving ${job.type} in batch: ${job.title}`);
-      let solveResult;
-      
-      if (job.type === 'mcq') {
-         solveResult = await solveMCQ(job.problemContent);
-      } else {
-         solveResult = await solve(`${job.problemContent.title}\n\n${job.problemContent.body}`, extractTestCases(job.problemContent.body), job.targetLanguage, {
-           starterCode: job.starterCode,
-           selectedLanguageLabel: job.selectedLanguageLabel,
-           previousFeedback: classifyFailureFeedback(''),
-           attempt: 1
-         });
-      }
-
-      return { ...job, solveResult };
-    });
-
-    let classCompleted = true;
-    for (const job of solvedJobs) {
-      if (!job || haltRun) {
-        break;
-      }
-
-      const { title, solveUrl, targetLanguage, selectedLanguageLabel, solveResult } = job;
-      console.log(`\n  Solving: ${title}`);
-      metrics.solveAttempts += 1;
-
-      if (job.type === 'launcher') continue; // Previously executed
-      
-      if (job.type === 'mcq') {
-         await page.goto(normalizeScalerUrl(solveUrl), { waitUntil: 'domcontentloaded' });
-         await ensureLoggedIn(page, ctx, 'problem page navigation');
-         await page.waitForLoadState('networkidle').catch(() => {});
-         
-         const mcqInjectResult = await injectMCQAnswer(page, solveResult.bestOptionIndex || 0);
-         log.push({ title, result: mcqInjectResult.status });
-         console.log(`  ${mcqInjectResult.status === 'pass' ? '✓' : '✗'} ${title} (${mcqInjectResult.verdict})`);
-         if (mcqInjectResult.status === 'pass') markProblemComplete(runState, solveUrl);
-         continue;
-      }
-      
-      if (!solveResult?.ok) {
-        if (solveResult?.type === 'rate_limit') {
-          const waitSec = Number(solveResult.retryAfterSeconds || 5);
-          if (solveResult.fatal) {
-            classCompleted = false;
-            haltRun = true;
-            haltReason = `Provider quota exhausted. Retry after reset. ${solveResult.message || ''}`;
-            console.log(`    Quota exhausted for the day. Stopping run.`);
-            break;
-          }
-
-          console.log(`    Provider rate-limited. Waiting ${waitSec}s before continue...`);
-          await DELAY((waitSec + 1) * 1000);
-        }
-
-        log.push({ title, result: 'fail' });
-        classCompleted = false;
+      if (pendingProblems.length === 0) {
+        console.log('All problems in this class are already completed from checkpoint.');
+        markClassComplete(runState, classUrl);
         continue;
       }
 
-      let result = 'fail';
-      let failureFeedback = '';
+      console.log(`Pending problems to solve: ${pendingProblems.length}/${problems.length}`);
 
-      await page.goto(normalizeScalerUrl(solveUrl), { waitUntil: 'domcontentloaded' });
-      await ensureLoggedIn(page, ctx, 'problem page navigation');
-      await page.waitForLoadState('networkidle').catch(() => {});
-
-      const languageSet = await selectProblemLanguage(page, targetLanguage);
-      if (!languageSet) {
-        console.log(`    Warning: could not confirm language switch to ${targetLanguage}.`);
+      // Spawn Page Pool
+      const poolSize = Math.min(SOLVE_CONCURRENCY, pendingProblems.length);
+      const workerPages = [];
+      workerPages.push(mainPage); // Main page serves as worker 0
+      for (let i = 1; i < poolSize; i++) {
+        workerPages.push(await ctx.newPage());
       }
 
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        const code = attempt === 1
-          ? solveResult.code
-          : (await solve(`${job.problemContent.title}\n\n${job.problemContent.body}`, '', targetLanguage, {
-              starterCode: job.starterCode,
-              selectedLanguageLabel,
-              previousFeedback: classifyFailureFeedback(failureFeedback),
-              attempt
-            })).code;
+      let problemQueueIndex = 0;
+      let classAllPassed = true;
 
-        if (!code || looksTruncated(code)) {
-          failureFeedback = 'Generated code appears truncated/incomplete. Regenerate full compilable code preserving starter scaffold.';
-          console.log('    Generated code appears incomplete locally, retrying without submit...');
-          classCompleted = false;
-          await DELAY(900);
-          continue;
+      async function runWorker(page, workerId) {
+        while (!globalHaltRun) {
+          let problem;
+          if (problemQueueIndex >= pendingProblems.length) {
+            break;
+          }
+          problem = pendingProblems[problemQueueIndex++];
+
+          const solveUrl = problem.solveUrl.startsWith('http') ? problem.solveUrl : `https://www.scaler.com${problem.solveUrl}`;
+          if (runState.completedProblems.has(solveUrl)) {
+            console.log(`  [Worker ${workerId}] Checkpoint hit: ${problem.title}`);
+            log.push({ title: problem.title, result: 'skipped' });
+            metrics.problemsSkipped += 1;
+            continue;
+          }
+
+          console.log(`\n  [Worker ${workerId}] Navigating to: ${problem.title}`);
+          metrics.problemsRead += 1;
+
+          await safeGoto(page, normalizeScalerUrl(solveUrl));
+          await ensureLoggedIn(page, ctx, `worker ${workerId} problem page`);
+
+          const solveState = await getProblemSolveState(page);
+          if (solveState === 'solved') {
+            console.log(`  [Worker ${workerId}] Already solved on Scaler: ${problem.title}`);
+            log.push({ title: problem.title, result: 'skipped' });
+            markProblemComplete(runState, solveUrl);
+            continue;
+          }
+
+          const targetLanguage = resolveTargetLanguage(subject);
+          const type = await detectProblemType(page);
+          console.log(`  [Worker ${workerId}] Detected problem type: ${type} for ${problem.title}`);
+
+          if (ONLY_MCQ && type !== 'mcq') {
+            console.log(`  [Worker ${workerId}] ⏭️ Skipping non-MCQ problem (--only-mcq active): ${problem.title}`);
+            log.push({ title: problem.title, result: 'skipped' });
+            continue;
+          }
+
+          let problemContent = await extractProblemContent(page);
+
+          if (type === 'lab' || type === 'launcher') {
+            if (SKIP_LABS || ONLY_MCQ) {
+              console.log(`  [Worker ${workerId}] ⏭️ Skipping terminal lab (${SKIP_LABS ? '--skip-labs' : '--only-mcq'} active): ${problem.title}`);
+              log.push({ title: problem.title, result: 'skipped' });
+              continue;
+            }
+
+            const release = await workspaceMutex.acquire();
+            try {
+              console.log(`  [Worker ${workerId}] Executing Maxwell container lab: ${problem.title}...`);
+              if (DRY_RUN) {
+                metrics.problemsDryRun += 1;
+                log.push({ title: problem.title, result: 'dry-run' });
+                console.log(`  [Worker ${workerId}] ↺ DRY-RUN Lab: ${problem.title}`);
+                continue;
+              }
+
+              metrics.solveAttempts += 1;
+              metrics.submitAttempts += 1;
+
+              const labResult = await solveAndSubmitLab(
+                page,
+                problem.title,
+                `${problemContent.title}\n\n${problemContent.body}`
+              );
+
+              log.push({ title: problem.title, result: labResult.status });
+
+              if (labResult.status === 'pass') {
+                metrics.problemsSolved += 1;
+                console.log(`  [Worker ${workerId}] ✓ Lab Passed: ${problem.title}`);
+                markProblemComplete(runState, solveUrl);
+              } else {
+                metrics.problemsFailed += 1;
+                classAllPassed = false;
+                console.log(`  [Worker ${workerId}] ✗ Lab ${labResult.verdict}: ${problem.title}`);
+              }
+            } finally {
+              release();
+            }
+            continue;
+          }
+
+          if (type === 'vscode') {
+            if (SKIP_LABS || ONLY_MCQ) {
+              console.log(`  [Worker ${workerId}] ⏭️ Skipping VS Code IDE problem (${SKIP_LABS ? '--skip-labs' : '--only-mcq'} active): ${problem.title}`);
+              log.push({ title: problem.title, result: 'skipped' });
+              continue;
+            }
+
+            if (DRY_RUN) {
+              metrics.problemsDryRun += 1;
+              log.push({ title: problem.title, result: 'dry-run' });
+              console.log(`  [Worker ${workerId}] ↺ DRY-RUN VS Code IDE: ${problem.title}`);
+              continue;
+            }
+
+            const release = await workspaceMutex.acquire();
+            try {
+              console.log(`  [Worker ${workerId}] Solving VS Code IDE problem: ${problem.title}...`);
+              metrics.solveAttempts += 1;
+
+              // Open the IDE if it hasn't loaded yet
+              const openBtn = page.locator('button:has-text("Open IDE"), a:has-text("Open IDE"), button:has-text("VS Code")').first();
+              if (await openBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+                await openBtn.click().catch(() => {});
+                await page.waitForTimeout(3000);
+              }
+
+              await waitForWorkspaceReady(page);
+              const workspaceFiles = await slurpWorkspaceContext(page);
+
+              if (Object.keys(workspaceFiles).length === 0) {
+                console.log(`  [Worker ${workerId}] ✗ Could not extract VS Code workspace files.`);
+                metrics.problemsFailed += 1;
+                classAllPassed = false;
+                log.push({ title: problem.title, result: 'fail' });
+                continue;
+              }
+
+              const wsResult = await solveWorkspace(problemContent, workspaceFiles);
+              if (!wsResult?.fileMap || Object.keys(wsResult.fileMap).length === 0) {
+                console.log(`  [Worker ${workerId}] ✗ AI returned empty fileMap for: ${problem.title}`);
+                metrics.problemsFailed += 1;
+                classAllPassed = false;
+                log.push({ title: problem.title, result: 'fail' });
+                continue;
+              }
+
+              await injectWorkspaceContext(page, wsResult.fileMap);
+              metrics.submitAttempts += 1;
+
+              // Click Run/Submit if available
+              const submitBtn = page.locator(SEL.submitBtn).first();
+              if (await submitBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+                await submitBtn.click().catch(() => {});
+                const verdict = await page.waitForFunction(() => {
+                  const t = (document.body.innerText || '').toLowerCase();
+                  return t.includes('correct answer') || t.includes('all test cases passed') || t.includes('wrong answer') || t.includes('failed');
+                }, { timeout: 40000 }).then(() => true).catch(() => false);
+
+                const bodyText = await page.locator('body').innerText().catch(() => '');
+                const passed = /correct answer|all test cases passed/i.test(bodyText);
+
+                if (passed) {
+                  metrics.problemsSolved += 1;
+                  console.log(`  [Worker ${workerId}] ✓ VS Code IDE Passed: ${problem.title}`);
+                  markProblemComplete(runState, solveUrl);
+                  log.push({ title: problem.title, result: 'pass' });
+                } else {
+                  metrics.problemsFailed += 1;
+                  classAllPassed = false;
+                  console.log(`  [Worker ${workerId}] ✗ VS Code IDE Failed: ${problem.title}`);
+                  log.push({ title: problem.title, result: 'fail' });
+                }
+              } else {
+                console.log(`  [Worker ${workerId}] ✗ No submit button found for VS Code problem.`);
+                metrics.problemsFailed += 1;
+                classAllPassed = false;
+                log.push({ title: problem.title, result: 'fail' });
+              }
+            } finally {
+              release();
+            }
+            continue;
+          }
+
+          if (type === 'mcq') {
+            problemContent = await slurpMCQContext(page);
+            console.log(`  [Worker ${workerId}] Solving MCQ: ${problem.title}`);
+            const mcqResult = await solveMCQ(problemContent);
+
+            if (DRY_RUN) {
+              metrics.problemsDryRun += 1;
+              log.push({ title: problem.title, result: 'dry-run' });
+              console.log(`  [Worker ${workerId}] ↺ DRY-RUN MCQ Option: ${mcqResult.bestOptionIndex + 1}`);
+              continue;
+            }
+
+            metrics.submitAttempts += 1;
+            const mcqInjectResult = await injectMCQAnswer(page, mcqResult.bestOptionIndex || 0);
+            log.push({ title: problem.title, result: mcqInjectResult.status });
+
+            if (mcqInjectResult.status === 'pass') {
+              metrics.problemsSolved += 1;
+              console.log(`  [Worker ${workerId}] ✓ MCQ Passed: ${problem.title}`);
+              markProblemComplete(runState, solveUrl);
+            } else {
+              metrics.problemsFailed += 1;
+              classAllPassed = false;
+              console.log(`  [Worker ${workerId}] ✗ MCQ ${mcqInjectResult.verdict}: ${problem.title}`);
+            }
+            continue;
+          }
+
+          // Coding problem
+          await selectProblemLanguage(page, targetLanguage);
+          const selectedLanguageLabel = await getCurrentSelectedLanguageLabel(page);
+          const starterCode = await extractEditorStarterCode(page);
+
+          let result = 'fail';
+          let failureFeedback = '';
+
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            if (globalHaltRun) break;
+
+            metrics.solveAttempts += 1;
+            console.log(`  [Worker ${workerId}] Solving coding (attempt ${attempt}): ${problem.title}`);
+
+            const solveResult = await solve(
+              `${problemContent.title}\n\n${problemContent.body}`,
+              extractTestCases(problemContent.body),
+              targetLanguage,
+              {
+                starterCode,
+                selectedLanguageLabel,
+                previousFeedback: classifyFailureFeedback(failureFeedback),
+                attempt
+              }
+            );
+
+            if (!solveResult?.ok) {
+              if (solveResult?.type === 'rate_limit') {
+                const waitSec = Number(solveResult.retryAfterSeconds || 5);
+                if (solveResult.fatal) {
+                  classAllPassed = false;
+                  globalHaltRun = true;
+                  globalHaltReason = `Provider quota exhausted. ${solveResult.message || ''}`;
+                  console.log(`  [Worker ${workerId}] Quota exhausted. Halting run.`);
+                  break;
+                }
+                console.log(`  [Worker ${workerId}] Rate limited. Waiting ${waitSec}s...`);
+                await DELAY((waitSec + 1) * 1000);
+              }
+              failureFeedback = solveResult?.message || 'Solver failed.';
+              continue;
+            }
+
+            const code = solveResult.code;
+            if (!code || looksTruncated(code)) {
+              failureFeedback = 'Generated code appears truncated. Regenerate full compilable code preserving starter scaffold.';
+              console.log(`  [Worker ${workerId}] Code truncated, retrying without submit...`);
+              continue;
+            }
+
+            if (DRY_RUN) {
+              result = 'dry-run';
+              metrics.problemsDryRun += 1;
+              console.log(`  [Worker ${workerId}] Dry-run preview:\n${previewCode(code)}\n`);
+              break;
+            }
+
+            metrics.submitAttempts += 1;
+            const submitResult = await injectAndSubmit(page, code);
+            result = submitResult.status;
+
+            if (result === 'pass') {
+              metrics.problemsSolved += 1;
+              console.log(`  [Worker ${workerId}] ✓ Passed! Verdict: ${submitResult.verdict}`);
+              break;
+            }
+
+            failureFeedback = submitResult.feedback || submitResult.verdict || 'Submission failed.';
+            console.log(`  [Worker ${workerId}] Attempt ${attempt} failed: ${failureFeedback.slice(0, 160)}...`);
+            await DELAY(500);
+          }
+
+          if (!['pass', 'dry-run'].includes(result)) {
+            metrics.problemsFailed += 1;
+            classAllPassed = false;
+          }
+
+          log.push({ title: problem.title, result });
+          const mark = result === 'pass' ? '✓' : (result === 'dry-run' ? '↺' : '✗');
+          console.log(`  [Worker ${workerId}] ${mark} ${problem.title}`);
+
+          if (result === 'pass') {
+            markProblemComplete(runState, solveUrl);
+          }
         }
-
-        if (DRY_RUN) {
-          result = 'dry-run';
-          metrics.problemsDryRun += 1;
-          console.log(`    Dry run code preview:\n${previewCode(code)}\n`);
-          break;
-        }
-
-        metrics.submitAttempts += 1;
-        const submitResult = await injectAndSubmit(page, code);
-        result = submitResult.status;
-
-        if (result === 'pass') {
-          metrics.problemsSolved += 1;
-          console.log(`    Test Passed! Verdict: ${submitResult.verdict}`);
-          break;
-        }
-
-        failureFeedback = submitResult.feedback || submitResult.verdict || 'Submission failed.';
-        console.log(`    Attempt ${attempt} ${result}. Feedback: ${failureFeedback.slice(0, 180)}...`);
-        classCompleted = false;
-        await DELAY(1500);
       }
 
-      if (!['pass', 'dry-run'].includes(result)) {
-        metrics.problemsFailed += 1;
+      // Execute all workers concurrently
+      const workers = workerPages.map((workerPage, i) => runWorker(workerPage, i));
+      await Promise.all(workers);
+
+      // Close extra worker pages to release memory, keeping mainPage
+      for (let i = 1; i < workerPages.length; i++) {
+        await workerPages[i].close().catch(() => {});
       }
 
-      log.push({ title, result });
-      const statusMark = result === 'pass' ? '✓' : (result === 'dry-run' ? '↺' : '✗');
-      console.log(`  ${statusMark} ${title}`);
-
-      if (result === 'pass') {
-        markProblemComplete(runState, solveUrl);
-      }
-
-      if (haltRun) {
-        break;
+      if (!DRY_RUN && classAllPassed && pendingProblems.length > 0 && !globalHaltRun) {
+        console.log(`✓ All problems passed for class: ${classUrl}. Marking class complete!`);
+        markClassComplete(runState, classUrl);
+      } else if (DRY_RUN && classAllPassed && pendingProblems.length > 0) {
+        console.log(`↺ Dry-run preview completed for class: ${classUrl}`);
       }
     }
-
-    if (classCompleted && problemJobs.length > 0) {
-      markClassComplete(runState, classUrl);
-    }
-
-    if (haltRun) {
-      break;
-    }
-  }
-
   } finally {
-    try { fs.writeFileSync('run-log.json', JSON.stringify(log, null, 2)); } catch {}
-    if (haltRun) {
-      console.log(`\nStopped early: ${haltReason}`);
+    try {
+      fs.writeFileSync('run-log.json', JSON.stringify(log, null, 2));
+    } catch {}
+
+    if (globalHaltRun) {
+      console.log(`\nStopped: ${globalHaltReason}`);
     }
+
     printRunSummary(metrics, log);
-    console.log(`\nDone. ${log.filter(l => l.result==='pass').length}/${log.length} passed. Run log saved to run-log.json.`);
+    console.log(`\nDone. ${log.filter(l => l.result === 'pass').length}/${log.length} passed. Run log saved to run-log.json.`);
     await ctx.close().catch(() => {});
   }
 }

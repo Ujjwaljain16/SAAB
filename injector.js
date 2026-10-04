@@ -117,7 +117,7 @@ async function waitForVerdict(page, timeoutMs = 55000) {
       };
     }
 
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(200);
   }
 
   const fallbackText = await page.locator('body').innerText().catch(() => '');
@@ -134,45 +134,39 @@ export async function injectAndSubmit(page, code) {
     return { status: 'fail', verdict: 'No code generated', feedback: 'Solver returned empty code.' };
   }
 
-  // Wait for editor DOM + Monaco JS API to be ready
-  await page.waitForSelector(SEL.editorContainer, { timeout: 10000 });
+  // Fast wait for editor DOM + Monaco JS API
+  await page.waitForSelector(SEL.editorContainer, { timeout: 8000 });
   await page.waitForFunction(
     () => window.monaco?.editor?.getModels?.()?.length > 0,
-    { timeout: 10000 }
+    { timeout: 8000 }
   ).catch(() => {});
-  await page.click(SEL.editorContainer);
-  await page.waitForTimeout(300);
 
   let directSet = await setMonacoValue(page, code);
 
-  // Verify Monaco content after injection
+  // Fast verify Monaco content after injection
   if (directSet) {
     const actual = await page.evaluate(() => {
       const models = window.monaco?.editor?.getModels?.();
       return models?.[0]?.getValue?.() || '';
     }).catch(() => '');
     if (actual.trim() !== code.trim()) {
-      console.warn('  Monaco setValue verification failed — content mismatch, falling back to keyboard.');
       directSet = false;
     }
   }
 
   if (!directSet) {
-    // Fallback only if Monaco internals are unavailable.
+    // Fallback only if direct Monaco API failed
+    await page.click(SEL.editorContainer).catch(() => {});
     const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
     await page.keyboard.press(`${modifier}+A`);
-    await page.waitForTimeout(100);
     await page.keyboard.press('Backspace');
-    await page.waitForTimeout(100);
     await pasteIntoEditor(page, code);
     await page.keyboard.press(`${modifier}+V`);
-    await page.waitForTimeout(1000);
-  } else {
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(200);
   }
 
-  // Dismiss optional helper modal if it appears.
-  await page.locator('a:has-text("No! I clicked by mistake")').first().click().catch(() => {});
+  // Dismiss optional helper modal if it appears (non-blocking)
+  page.locator('a:has-text("No! I clicked by mistake")').first().click().catch(() => {});
 
   // Guard submit button — check it exists before clicking
   const submitLocator = page.locator(SEL.submitBtn).first();

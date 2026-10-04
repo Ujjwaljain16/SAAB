@@ -1,12 +1,11 @@
 // config.js — update these if Scaler changes their DOM
-// Provide fallback selectors given in original architecture
 export const SEL = {
   // Curriculum / Dashboard page
-  subjectItem:    'a[href*="/classes"], .module-name', // links to specific subject modules
+  subjectItem:    'a[href*="/core-curriculum/m/"][href*="/classes"], a[href*="/classes"], .module-name', 
   classRow:       '.session-row, div[class*="session-row"], .curriculum-item, tr:has-text("Assignment")', 
   assignmentCount:'.assignment-count, .assignment-badge, div:has-text("%"):not(:has-text("Attendance"))', 
   classLink:      'a.session-link, a[href*="/session/"], a:has-text("View"), a:has-text("Solve")', 
-  classTitleLink: 'a.me-cr-classroom-url[data-cy="classroom-link"]',
+  classTitleLink: 'a.me-cr-classroom-url[data-cy="classroom-link"], a[href*="/academy/mentee-dashboard/class/"]:not([href*="/assignment"]):not([href*="/homework"])',
   classAssignmentLink: 'a.me-cr-classroom-url[data-cy="classroom-link"][href*="/assignment"]',
 
   // Inside a class
@@ -20,10 +19,10 @@ export const SEL = {
 
   // Monaco editor
   editorContainer:'.monaco-editor',
-  editorInput:    '.monaco-editor textarea',  // real input target
+  editorInput:    '.monaco-editor textarea',
 
   // Buttons
-  submitBtn:      'button.cr-judge-action--submit',
+  submitBtn:      'button.cr-judge-action--submit, button:has-text("Submit"), a:has-text("Submit")',
   testBtn:        'button.cr-judge-action--test, button:has-text("Test with custom input")',
 
   // Result
@@ -31,9 +30,7 @@ export const SEL = {
   resultFail:     '.test-result:has-text("Failed")',
 };
 
-// Target Subjects (partial names or regex allowed)
-export const TARGET_SUBJECTS = [
-  "Data Structure", 
-  "Low Level Design", 
-  "Programming using JS"
-];
+// Target Subjects: If specified in .env, filter to those; otherwise SAAB auto-discovers all subjects in the current term!
+export const TARGET_SUBJECTS = process.env.TARGET_SUBJECTS
+  ? process.env.TARGET_SUBJECTS.split(',').map((s) => s.trim()).filter(Boolean)
+  : [];

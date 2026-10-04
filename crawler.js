@@ -48,9 +48,7 @@ function saveApiCache(cache) {
     const tmp = API_CACHE_PATH + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(payload, null, 2));
     fs.renameSync(tmp, API_CACHE_PATH);
-  } catch {
-    // ignore cache write errors
-  }
+  } catch {}
 }
 
 function isFreshApiCache(cache) {
@@ -59,8 +57,8 @@ function isFreshApiCache(cache) {
   return Number.isFinite(age) && age <= API_CACHE_TTL_MS;
 }
 
-function makeCurriculumCacheKey(subjects) {
-  const payload = JSON.stringify({ subjects });
+function makeCurriculumCacheKey(term, subjects) {
+  const payload = JSON.stringify({ term, subjects });
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
@@ -80,236 +78,99 @@ function readCurriculumCache() {
   }
 }
 
-function writeCurriculumCache(subjects, queue) {
+function writeCurriculumCache(term, subjects, queue) {
+  if (!queue || queue.length === 0) return;
   try {
     const payload = {
       version: 1,
-      cacheKey: makeCurriculumCacheKey(subjects),
+      cacheKey: makeCurriculumCacheKey(term, subjects),
       updatedAt: new Date().toISOString(),
+      term,
       subjects,
       queue
     };
     const tmp = CURRICULUM_CACHE_PATH + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(payload, null, 2));
     fs.renameSync(tmp, CURRICULUM_CACHE_PATH);
-  } catch {
-    // ignore cache write errors
-  }
-}
-
-function collectStrings(node, out = []) {
-  if (node == null) return out;
-
-  if (typeof node === 'string' || typeof node === 'number' || typeof node === 'boolean') {
-    out.push(String(node));
-    return out;
-  }
-
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      collectStrings(item, out);
-    }
-    return out;
-  }
-
-  if (typeof node === 'object') {
-    for (const value of Object.values(node)) {
-      collectStrings(value, out);
-    }
-  }
-
-  return out;
-}
-
-function extractCardFromObject(obj) {
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
-
-  const urlValue = obj.classUrl || obj.url || obj.href || obj.link || obj.path || obj.slug;
-  const textValue = obj.title || obj.name || obj.className || obj.courseName || obj.label || obj.text;
-  const urlText = String(urlValue || '');
-  const text = String(textValue || '').trim();
-
-  if (!text || !urlText) return null;
-  if (!urlText.includes('/academy/mentee-dashboard/class/')) return null;
-
-  const allStrings = collectStrings(obj, []);
-  const assignmentText = allStrings.find((value) => /assignment/i.test(value) && /\d+\s*\/\s*\d+/.test(value)) || '';
-  const homeworkText = allStrings.find((value) => /additional|homework/i.test(value) && /\d+\s*\/\s*\d+/.test(value)) || '';
-  const rowText = allStrings.join(' ');
-
-  return {
-    title: text,
-    classUrl: urlText.startsWith('http') ? urlText : `https://www.scaler.com${urlText}`,
-    assignmentText,
-    homeworkText,
-    rowText
-  };
-}
-
-function extractQueueFromPayload(payload) {
-  const queue = [];
-  const seen = new Set();
-
-  function walk(node) {
-    if (!node) return;
-
-    if (Array.isArray(node)) {
-      for (const item of node) {
-        walk(item);
-      }
-      return;
-    }
-
-    if (typeof node === 'object') {
-      const card = extractCardFromObject(node);
-      if (card && !seen.has(card.classUrl)) {
-        const assignmentProgress = parseProgressCount(card.assignmentText) || parseProgressCount(card.rowText);
-        const hasPendingAssignment = assignmentProgress ? assignmentProgress.completed < assignmentProgress.total : false;
-
-        if (hasPendingAssignment) {
-          seen.add(card.classUrl);
-          queue.push({
-            classUrl: card.classUrl,
-            subject: '',
-            pending: `Assignment ${assignmentProgress.completed}/${assignmentProgress.total}`
-          });
-        }
-      }
-
-      for (const value of Object.values(node)) {
-        walk(value);
-      }
-    }
-  }
-
-  walk(payload);
-  return queue;
-}
-
-async function fetchJsonWithSession(page, url) {
-  return page.evaluate(async (targetUrl) => {
-    const response = await fetch(targetUrl, {
-      credentials: 'include',
-      headers: {
-        accept: 'application/json, text/plain, */*'
-      }
-    });
-
-    const text = await response.text();
-    return {
-      ok: response.ok,
-      status: response.status,
-      contentType: response.headers.get('content-type') || '',
-      text
-    };
-  }, url);
-}
-
-async function tryApiQueueForSubject(page, subjectName, cache) {
-  const subjectCache = cache.subjects?.[subjectName];
-  if (!subjectCache || !Array.isArray(subjectCache.endpoints) || subjectCache.endpoints.length === 0) {
-    return null;
-  }
-
-  for (const endpoint of subjectCache.endpoints.slice(0, 3)) {
-    try {
-      const result = await fetchJsonWithSession(page, endpoint.url);
-      if (!result) continue;
-      if (result.status === 401) {
-        console.error('  \u26a0 API returned 401 \u2014 session may have expired. Re-run: node auth.js');
-        return null;
-      }
-      if (!result.ok || !/json/i.test(result.contentType)) continue;
-
-      const payload = JSON.parse(result.text);
-      const queue = extractQueueFromPayload(payload);
-      if (queue.length > 0) {
-        console.log(`  API cache hit for ${subjectName}: ${endpoint.url}`);
-        return queue.map((item) => ({ ...item, subject: subjectName }));
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return null;
+  } catch {}
 }
 
 export async function getQueue(page) {
-  console.log('Navigating to dashboard to find specified subjects...');
+  if (!page.url().includes('/core-curriculum')) {
+    console.log('Navigating to Scaler Core Curriculum dashboard...');
+    await page.goto(normalizeScalerUrl('https://www.scaler.com/academy/mentee-dashboard/core-curriculum/'), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(async () => {
+      await page.goto(normalizeScalerUrl('https://www.scaler.com/academy/mentee-dashboard/core-curriculum/'), { waitUntil: 'commit', timeout: 45000 });
+    });
+  }
+  await page.waitForTimeout(2000);
 
+  // Detect current active term
+  const activeTerm = await page.evaluate(() => {
+    const termEl = document.querySelector('.dropdown__title, .me-cc-header__main, [class*="term-title"]');
+    return (termEl?.innerText || '').trim().replace(/\s+/g, ' ');
+  }).catch(() => 'Current Term');
+
+  console.log(`\n============================================================`);
+  console.log(`Academic Term: ${activeTerm || 'Active Term'}`);
+  console.log(`============================================================`);
+
+  // Auto-discover all subjects in the active term
+  const discoveredSubjects = await page.evaluate(() => {
+    const anchors = Array.from(document.querySelectorAll('a[href*="/core-curriculum/m/"][href*="/classes"]'));
+    const seen = new Set();
+    const list = [];
+    for (const a of anchors) {
+      const href = a.getAttribute('href') || '';
+      const text = (a.innerText || '').trim().replace(/\s+/g, ' ');
+      if (text && !seen.has(href)) {
+        seen.add(href);
+        const cleanName = text.replace(/^SUBJECT\s*-\s*\d+\s*/i, '').trim();
+        list.push({
+          name: cleanName || text,
+          fullName: text,
+          url: href.startsWith('http') ? href : `https://www.scaler.com${href}`
+        });
+      }
+    }
+    return list;
+  });
+
+  if (discoveredSubjects.length === 0) {
+    console.log('No subjects found in core curriculum. Checking if already on classes list...');
+  }
+
+  // Filter subjects if user defined TARGET_SUBJECTS in .env
+  let targetSubjects = discoveredSubjects;
+  if (TARGET_SUBJECTS.length > 0) {
+    targetSubjects = discoveredSubjects.filter(sub =>
+      TARGET_SUBJECTS.some(t => new RegExp(t, 'i').test(sub.name) || new RegExp(t, 'i').test(sub.fullName))
+    );
+    console.log(`Filtered subjects by TARGET_SUBJECTS: ${targetSubjects.map(s => s.name).join(', ')}`);
+  }
+
+  console.log(`\nFound ${targetSubjects.length} subject(s) in ${activeTerm}:`);
+  targetSubjects.forEach((sub, i) => {
+    console.log(`  ${i + 1}. ${sub.fullName}`);
+  });
+
+  // Check cache
   const cached = readCurriculumCache();
-  if (cached && makeCurriculumCacheKey(TARGET_SUBJECTS) === cached.cacheKey) {
-    console.log(`Using curriculum cache (${cached.queue.length} classes, refreshed ${cached.updatedAt}).`);
+  const cacheKey = makeCurriculumCacheKey(activeTerm, targetSubjects.map(s => s.name));
+  if (cached && cached.cacheKey === cacheKey && cached.queue.length > 0 && !process.argv.includes('--refresh-curriculum')) {
+    console.log(`\nUsing cached curriculum queue (${cached.queue.length} classes, refreshed ${cached.updatedAt}).`);
     return cached.queue;
   }
 
-  await page.goto(normalizeScalerUrl('https://www.scaler.com/academy/mentee-dashboard/core-curriculum/'));
-  await page.waitForLoadState('networkidle').catch(() => {});
-
   const queue = [];
-  const apiCache = loadApiCache();
 
-  for (const subjectName of TARGET_SUBJECTS) {
-    console.log(`\nLooking for subject: ${subjectName}`);
-    const discoveredEndpoints = new Set();
-    const responseHandler = async (response) => {
-      try {
-        const url = response.url();
-        const contentType = response.headers()['content-type'] || '';
-        if (!/json/i.test(contentType)) return;
-        if (!/scaler\.com/i.test(url)) return;
-        if (!/(api|graphql|curriculum|class|batch|course|module|assignment)/i.test(url)) return;
+  for (const subject of targetSubjects) {
+    console.log(`\n------------------------------------------------------------`);
+    console.log(`Scanning classes in: ${subject.fullName}`);
+    console.log(`URL: ${subject.url}`);
+    console.log(`------------------------------------------------------------`);
 
-        const text = await response.text().catch(() => '');
-        if (!text) return;
-
-        if (/\/academy\/mentee-dashboard\/class\//.test(text) || /assignment/i.test(text) || /module/i.test(text)) {
-          discoveredEndpoints.add(url);
-        }
-      } catch {
-        // ignore individual response capture failures
-      }
-    };
-
-    page.on('response', responseHandler);
-    
-    // Attempt 1: Normal locator search
-    let subjectLink = page.locator(SEL.subjectItem, { hasText: new RegExp(subjectName, 'i') }).first();
-    
-    // Attempt 2: More aggressive search for any clickable with that text
-    if (await subjectLink.count() === 0) {
-      console.log(`  Target text not found in primary elements, searching all links...`);
-      subjectLink = page.locator('a, div').filter({ hasText: new RegExp(subjectName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).last();
-    }
-    
-    if (await subjectLink.count() === 0) {
-      console.log(`  Subject "${subjectName}" could not be located. Skipping.`);
-      continue;
-    }
-
-    const href = await subjectLink.getAttribute('href');
-    if (!href) {
-       console.log(`  Could not find href for ${subjectName}. Clicking instead...`);
-       await subjectLink.click();
-    } else {
-      const fullUrl = normalizeScalerUrl(href.startsWith('http') ? href : `https://www.scaler.com${href}`);
-       console.log(`  Navigating to: ${fullUrl}`);
-       await page.goto(fullUrl, { waitUntil: 'domcontentloaded' });
-    }
-    
-    await page.waitForLoadState('networkidle').catch(() => {});
-
-      if (isFreshApiCache(apiCache)) {
-        const apiQueue = await tryApiQueueForSubject(page, subjectName, apiCache);
-        if (apiQueue && apiQueue.length > 0) {
-          console.log(`  Using cached API queue for ${subjectName} (${apiQueue.length} classes).`);
-          queue.push(...apiQueue);
-          await page.goto(normalizeScalerUrl('https://www.scaler.com/academy/mentee-dashboard/core-curriculum/'));
-          await page.waitForTimeout(1200);
-          continue;
-        }
-      }
+    await page.goto(subject.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector(SEL.classTitleLink, { timeout: 10000 }).catch(() => {});
 
     const classCards = await page.$$eval(SEL.classTitleLink, (anchors) =>
       anchors
@@ -320,23 +181,39 @@ export async function getQueue(page) {
             return null;
           }
 
-          let row = anchor.parentElement;
-          while (row && !row.querySelector('a[href*="/assignment"]')) {
-            row = row.parentElement;
+          const match = href.match(/\/class\/(\d+)/);
+          const classId = match ? match[1] : '';
+
+          // Look for assignment and homework link specifically tied to THIS class ID
+          let assignmentLink = classId ? document.querySelector(`a[href*="/class/${classId}/assignment"]`) : null;
+          let homeworkLink = classId ? document.querySelector(`a[href*="/class/${classId}/homework"]`) : null;
+
+          // Fallback to row search if class ID not present in href
+          if (!assignmentLink) {
+            let row = anchor.parentElement;
+            let depth = 0;
+            while (row && depth < 4 && row.tagName !== 'BODY') {
+              if (row.querySelectorAll('a[href*="/academy/mentee-dashboard/class/"]:not([href*="/assignment"])').length > 1) {
+                break; // Don't escape class card boundary
+              }
+              const found = row.querySelector('a[href*="/assignment"]');
+              if (found) {
+                assignmentLink = found;
+                break;
+              }
+              row = row.parentElement;
+              depth++;
+            }
           }
 
-          const assignmentLink = row ? row.querySelector('a[href*="/assignment"]') : null;
-          const homeworkLink = row ? row.querySelector('a[href*="/homework"]') : null;
           const assignmentText = (assignmentLink?.textContent || '').trim();
           const homeworkText = (homeworkLink?.textContent || '').trim();
-          const rowText = (row?.textContent || '').trim();
 
           return {
             title: text,
             classUrl: href.startsWith('http') ? href : `https://www.scaler.com${href}`,
             assignmentText,
             homeworkText,
-            rowText,
           };
         })
         .filter(Boolean)
@@ -348,42 +225,28 @@ export async function getQueue(page) {
         }, [])
     );
 
-    console.log(`  Found ${classCards.length} potential class cards in this module.`);
+    console.log(`  Found ${classCards.length} class(es) in this subject.`);
 
     for (const card of classCards) {
-      // Assignment-only mode: skip classes that are pending only in Additional/Homework.
       const assignmentProgress = parseProgressCount(card.assignmentText);
       const hasPendingAssignment = assignmentProgress ? assignmentProgress.completed < assignmentProgress.total : false;
 
       if (hasPendingAssignment) {
         const pending = `Assignment ${assignmentProgress.completed}/${assignmentProgress.total}`;
-        console.log(`    Found pending: ${card.title} (${pending})`);
-        queue.push({ classUrl: card.classUrl, subject: subjectName, pending });
+        console.log(`    → Unsolved: ${card.title} (${pending})`);
+        queue.push({
+          classUrl: card.classUrl,
+          subject: subject.name,
+          pending
+        });
       }
     }
-
-    page.off('response', responseHandler);
-
-    const subjectEndpoints = Array.from(discoveredEndpoints).map((url) => ({ url, discoveredAt: new Date().toISOString() }));
-    if (subjectEndpoints.length > 0) {
-      apiCache.subjects = apiCache.subjects || {};
-      apiCache.subjects[subjectName] = {
-        updatedAt: new Date().toISOString(),
-        endpoints: subjectEndpoints
-      };
-      saveApiCache(apiCache);
-      console.log(`  Cached ${subjectEndpoints.length} API endpoint(s) for ${subjectName}.`);
-    }
-
-
-    
-    // Go back to dashboard for next subject
-    await page.goto(normalizeScalerUrl('https://www.scaler.com/academy/mentee-dashboard/core-curriculum/'));
-    await page.waitForLoadState('domcontentloaded').catch(() => {});
   }
 
-  console.log(`\nQueue generation complete. Found ${queue.length} target classes.`);
+  console.log(`\n============================================================`);
+  console.log(`Queue generation complete. Found ${queue.length} pending class(es) to solve.`);
+  console.log(`============================================================\n`);
 
-  writeCurriculumCache(TARGET_SUBJECTS, queue);
+  writeCurriculumCache(activeTerm, targetSubjects.map(s => s.name), queue);
   return queue;
 }
