@@ -391,19 +391,28 @@ function buildProblemsUrl(assignmentUrl) {
 }
 
 async function safeGoto(page, url, options = {}) {
-  const opts = {
-    waitUntil: 'domcontentloaded',
-    timeout: 60000,
-    ...options
-  };
-  try {
-    return await page.goto(url, opts);
-  } catch (err) {
-    if (err.name === 'TimeoutError' || err.message?.includes('Timeout') || err.message?.includes('timeout')) {
-      console.log(`Navigation to ${url.slice(0, 60)} timed out. Retrying with commit...`);
-      return await page.goto(url, { ...opts, waitUntil: 'commit', timeout: 45000 });
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const opts = {
+      waitUntil: attempt === 1 ? 'domcontentloaded' : 'commit',
+      timeout: attempt === 1 ? 45000 : 60000,
+      ...options
+    };
+    try {
+      if (page.url() === url) {
+        return;
+      }
+      return await page.goto(url, opts);
+    } catch (err) {
+      const isAbort = /ERR_ABORTED|net::ERR_|aborted/i.test(err.message || '');
+      const isTimeout = err.name === 'TimeoutError' || /timeout/i.test(err.message || '');
+      if (attempt < maxRetries && (isAbort || isTimeout)) {
+        console.log(`  [safeGoto] Navigation to ${url.slice(0, 65)} failed (${isAbort ? 'ERR_ABORTED' : 'timeout'}). Retrying (attempt ${attempt + 1}/${maxRetries})...`);
+        await DELAY(1500 * attempt);
+        continue;
+      }
+      throw err;
     }
-    throw err;
   }
 }
 
@@ -538,33 +547,40 @@ async function run() {
       console.log(`Processing class: ${classUrl}\nPending: ${pending}\nSubject: ${subject}`);
       console.log(`============================================================`);
 
-      await safeGoto(mainPage, classUrl);
-      await ensureLoggedIn(mainPage, ctx, 'class navigation');
+      try {
+        let problemsUrl = normalizeScalerUrl(`${classUrl}/assignment/problems?navref=cl_tb_br`);
+        await safeGoto(mainPage, problemsUrl);
+        await ensureLoggedIn(mainPage, ctx, 'assignment problems navigation');
 
-      const assignmentTab = mainPage.locator(SEL.assignmentTab).first();
-      await assignmentTab.waitFor({ state: 'visible', timeout: 10000 }).catch(() => console.log("Failed to find 'Assignment' tab."));
+        const hasDirectProblems = await mainPage.waitForSelector('tr.table__row a[href*="/assignment/problems/"], a.cr-p-navigation-dock-item[href*="/assignment/problems/"]', { timeout: 8000 }).catch(() => null);
+        if (!hasDirectProblems && !mainPage.url().includes('/assignment/problems')) {
+          console.log(`  Falling back to tab navigation for class ${classUrl}...`);
+          await safeGoto(mainPage, classUrl);
+          await ensureLoggedIn(mainPage, ctx, 'class navigation');
 
-      let assignmentUrl = normalizeScalerUrl(`${classUrl}/assignment?navref=cl_tb_br`);
-      const assignmentHref = await assignmentTab.getAttribute('href').catch(() => null);
-      if (assignmentHref) {
-        assignmentUrl = normalizeScalerUrl(assignmentHref.startsWith('http') ? assignmentHref : `https://www.scaler.com${assignmentHref}`);
-      } else {
-        await assignmentTab.click().catch(() => {});
-      }
+          const assignmentTab = mainPage.locator(SEL.assignmentTab).first();
+          await assignmentTab.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+          const assignmentHref = await assignmentTab.getAttribute('href').catch(() => null);
+          if (assignmentHref) {
+            problemsUrl = buildProblemsUrl(normalizeScalerUrl(assignmentHref.startsWith('http') ? assignmentHref : `https://www.scaler.com${assignmentHref}`));
+            await safeGoto(mainPage, problemsUrl);
+          } else {
+            await assignmentTab.click().catch(() => {});
+            await DELAY(1500);
+          }
+          await ensureLoggedIn(mainPage, ctx, 'assignment problems navigation');
+        }
 
-      const problemsUrl = buildProblemsUrl(assignmentUrl);
-      await safeGoto(mainPage, problemsUrl);
-      await ensureLoggedIn(mainPage, ctx, 'assignment problems navigation');
-      await mainPage.waitForSelector('tr.table__row a[href*="/assignment/problems/"], a.cr-p-navigation-dock-item[href*="/assignment/problems/"]', { timeout: 12000 }).catch(() => {});
+        await mainPage.waitForSelector('tr.table__row a[href*="/assignment/problems/"], a.cr-p-navigation-dock-item[href*="/assignment/problems/"]', { timeout: 12000 }).catch(() => {});
 
-      const tableProblems = await collectAssignmentProblems(mainPage);
-      const questionTabs = await collectQuestionTabs(mainPage);
-      const problems = tableProblems.length > 0 ? tableProblems : questionTabs;
+        const tableProblems = await collectAssignmentProblems(mainPage);
+        const questionTabs = await collectQuestionTabs(mainPage);
+        const problems = tableProblems.length > 0 ? tableProblems : questionTabs;
 
-      if (problems.length === 0) {
-        console.log('No assignment problems found on this page.');
-        continue;
-      }
+        if (problems.length === 0) {
+          console.log('No assignment problems found on this page.');
+          continue;
+        }
 
       console.log(`Found ${problems.length} assignment problem(s). Initiating Page Pool workers...`);
 
@@ -897,11 +913,15 @@ async function run() {
         await workerPages[i].close().catch(() => {});
       }
 
-      if (!DRY_RUN && classAllPassed && pendingProblems.length > 0 && !globalHaltRun) {
-        console.log(`✓ All problems passed for class: ${classUrl}. Marking class complete!`);
-        markClassComplete(runState, classUrl);
-      } else if (DRY_RUN && classAllPassed && pendingProblems.length > 0) {
-        console.log(`↺ Dry-run preview completed for class: ${classUrl}`);
+        if (!DRY_RUN && classAllPassed && pendingProblems.length > 0 && !globalHaltRun) {
+          console.log(`✓ All problems passed for class: ${classUrl}. Marking class complete!`);
+          markClassComplete(runState, classUrl);
+        } else if (DRY_RUN && classAllPassed && pendingProblems.length > 0) {
+          console.log(`↺ Dry-run preview completed for class: ${classUrl}`);
+        }
+      } catch (classErr) {
+        console.error(`  ⚠️ Error processing class ${classUrl}:`, classErr.message);
+        metrics.classesSkipped += 1;
       }
     }
   } finally {
