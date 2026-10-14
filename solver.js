@@ -1067,7 +1067,8 @@ Example output:
   // Fallback to groq if available
   if (GROQ_API_KEY) {
     try {
-      const gResult = await generateWithGroq(prompt, GROQ_MODEL, 2048, "application/json");
+      solverStats.groqRequests++;
+      const gResult = await generateWithGroq(textPrompt, GROQ_MODEL, 2048, "application/json");
       if (gResult.ok) {
         const parsed = extractJsonBlock(gResult.text);
         if (typeof parsed?.bestOptionIndex === 'number') {
