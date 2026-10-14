@@ -5,7 +5,7 @@ import path from 'path';
 import crypto from 'crypto';
 
 const CURRICULUM_CACHE_PATH = path.join(process.cwd(), 'curriculum-cache.json');
-const CURRICULUM_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const CURRICULUM_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes (dynamic refresh for added/modified questions)
 const API_CACHE_PATH = path.join(process.cwd(), 'api-endpoints.json');
 const API_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -156,8 +156,8 @@ export async function getQueue(page) {
 
   // Check cache
   const cached = readCurriculumCache();
-  const cacheKey = makeCurriculumCacheKey(activeTerm, targetSubjects.map(s => s.name));
-  if (cached && cached.cacheKey === cacheKey && cached.queue.length > 0 && !process.argv.includes('--refresh-curriculum')) {
+  const isCacheBypassed = process.argv.includes('--refresh-curriculum') || process.argv.includes('--live') || process.argv.includes('--recheck') || process.argv.includes('--force');
+  if (cached && cached.cacheKey === cacheKey && cached.queue.length > 0 && !isCacheBypassed) {
     console.log(`\nUsing cached curriculum queue (${cached.queue.length} classes, refreshed ${cached.updatedAt}).`);
     return cached.queue;
   }

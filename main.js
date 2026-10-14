@@ -327,19 +327,20 @@ async function collectAssignmentProblems(page) {
   return page.$$eval('tr.table__row', (rows) =>
     rows
       .map((row) => {
-        const nameLink = row.querySelector('a.me-cr-classroom-url.me-cr-problem-list__name[href*="/assignment/problems/"]');
+        const nameLink = row.querySelector('a[href*="/assignment/problems/"]');
         const solveLink = row.querySelector('a.me-cr-classroom-url.me-cr-problem-actions__btn[href*="/assignment/problems/"]');
+        const targetLink = solveLink || nameLink;
 
-        if (!nameLink || !solveLink) {
+        if (!targetLink) {
           return null;
         }
 
-        const title = (nameLink.textContent || '').trim();
+        const title = (nameLink?.textContent || row.querySelector('td')?.textContent || '').trim();
         const statusText = (row.innerText || '').trim().replace(/\s+/g, ' ');
 
         return {
-          title,
-          solveUrl: solveLink.getAttribute('href') || '',
+          title: title || 'Problem',
+          solveUrl: targetLink.getAttribute('href') || '',
           statusText,
         };
       })
@@ -348,18 +349,17 @@ async function collectAssignmentProblems(page) {
 }
 
 async function collectQuestionTabs(page) {
-  return page.$$eval('a.cr-p-navigation-dock-item.me-cr-p-nav-dock-item[href*="/assignment/problems/"]', (tabs) =>
+  return page.$$eval('a.cr-p-navigation-dock-item[href*="/assignment/problems/"], a[href*="/assignment/problems/"]', (tabs) =>
     tabs
       .map((tab) => {
-        const text = (tab.textContent || '').trim().replace(/\s+/g, ' ');
         const href = tab.getAttribute('href') || '';
-
-        if (!href || !/^Q\s*\d+/i.test(text)) {
+        if (!href.includes('/assignment/problems/')) {
           return null;
         }
+        const text = (tab.textContent || '').trim().replace(/\s+/g, ' ');
 
         return {
-          title: text,
+          title: text || `Question ${href.split('/').pop()}`,
           solveUrl: href,
         };
       })
@@ -519,16 +519,7 @@ async function run() {
     await ensureLoggedIn(mainPage, ctx, 'initial dashboard open');
 
     const queue = await getQueue(mainPage);
-    let filteredQueue = queue.filter(({ classUrl, pending }) => {
-      if (FORCE_RECHECK) return true;
-      const progress = parseProgressCount(pending);
-      if (progress && progress.completed < progress.total) {
-        // If curriculum explicitly shows unsolved problems (e.g. 13/18), never skip it
-        runState.completedClasses.delete(classUrl);
-        return true;
-      }
-      return !runState.completedClasses.has(classUrl);
-    });
+    let filteredQueue = queue;
     if (SUBJECT_FILTER) {
       filteredQueue = filteredQueue.filter(({ subject }) => (subject || '').toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
       console.log(`--subject filter active: "${SUBJECT_FILTER}", ${filteredQueue.length} class(es) matched.`);
@@ -585,7 +576,16 @@ async function run() {
 
         const tableProblems = await collectAssignmentProblems(mainPage);
         const questionTabs = await collectQuestionTabs(mainPage);
-        const problems = tableProblems.length > 0 ? tableProblems : questionTabs;
+        const problemMap = new Map();
+        for (const p of [...tableProblems, ...questionTabs]) {
+          if (p?.solveUrl) {
+            const norm = normalizeScalerUrl(p.solveUrl);
+            if (!problemMap.has(norm)) {
+              problemMap.set(norm, p);
+            }
+          }
+        }
+        const problems = Array.from(problemMap.values());
 
         if (problems.length === 0) {
           console.log('No assignment problems found on this page.');
