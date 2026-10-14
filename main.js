@@ -7,7 +7,7 @@ import { slurpWorkspaceContext, injectWorkspaceContext, waitForWorkspaceReady } 
 import { slurpMCQContext, injectMCQAnswer } from './mcq_handler.js';
 import { solveAndSubmitLab } from './lab_handler.js';
 import { SEL } from './config.js';
-import { normalizeScalerUrl } from './scaler_url.js';
+import { normalizeScalerUrl, canonicalProblemUrl } from './scaler_url.js';
 import { loginToScaler } from './scaler_login.js';
 import fs from 'fs';
 import path from 'path';
@@ -140,9 +140,14 @@ function saveRunState(state) {
 
 function makeRunState() {
   const stored = loadRunState();
+  const completedProblems = new Set();
+  for (const p of stored.completedProblems) {
+    const c = canonicalProblemUrl(p);
+    if (c) completedProblems.add(c);
+  }
   return {
     completedClasses: new Set(stored.completedClasses),
-    completedProblems: new Set(stored.completedProblems)
+    completedProblems
   };
 }
 
@@ -159,8 +164,11 @@ function markClassComplete(runState, classUrl) {
 }
 
 function markProblemComplete(runState, problemKey) {
-  runState.completedProblems.add(problemKey);
-  persistRunState(runState);
+  const canon = canonicalProblemUrl(problemKey);
+  if (canon) {
+    runState.completedProblems.add(canon);
+    persistRunState(runState);
+  }
 }
 
 function previewCode(code, maxLines = 18) {
@@ -337,11 +345,13 @@ async function collectAssignmentProblems(page) {
 
         const title = (nameLink?.textContent || row.querySelector('td')?.textContent || '').trim();
         const statusText = (row.innerText || '').trim().replace(/\s+/g, ' ');
+        const isSolved = /solved|100\s*\/\s*100/i.test(statusText) && !/unsolved/i.test(statusText);
 
         return {
           title: title || 'Problem',
           solveUrl: targetLink.getAttribute('href') || '',
           statusText,
+          isSolved,
         };
       })
       .filter(Boolean)
@@ -357,10 +367,14 @@ async function collectQuestionTabs(page) {
           return null;
         }
         const text = (tab.textContent || '').trim().replace(/\s+/g, ' ');
+        const isSolved = tab.classList.contains('cr-p-navigation-dock-item--success') ||
+                         tab.classList.contains('me-cr-p-nav-dock-item--success') ||
+                         tab.querySelector('svg[class*="success"], i[class*="check"], [class*="status-tag--success"]') != null;
 
         return {
           title: text || `Question ${href.split('/').pop()}`,
           solveUrl: href,
+          isSolved,
         };
       })
       .filter(Boolean)
@@ -368,15 +382,16 @@ async function collectQuestionTabs(page) {
 }
 
 async function getProblemSolveState(page) {
+  await page.waitForSelector('.cr-p-heading .status-tag-2, .cr-p-heading [class*="status"], [class*="status-tag"]', { timeout: 2500 }).catch(() => {});
   return page.evaluate(() => {
-    const headingEl = document.querySelector('.cr-p-heading .status-tag-2, .cr-p-heading [class*="status"]');
+    const headingEl = document.querySelector('.cr-p-heading .status-tag-2, .cr-p-heading [class*="status"], [class*="status-tag"]');
     if (headingEl) {
       const text = (headingEl.textContent || '').trim().toLowerCase();
       if (text.includes('solved') && !text.includes('unsolved')) return 'solved';
       if (text.includes('unsolved')) return 'unsolved';
       if (text.includes('attempted')) return 'attempted';
     }
-    const hasSolvedBadge = document.querySelector('.cr-p-heading .status-tag-2--success') != null;
+    const hasSolvedBadge = document.querySelector('.cr-p-heading .status-tag-2--success, .status-tag--success, [class*="status-tag--success"]') != null;
     if (hasSolvedBadge) return 'solved';
     return 'unsolved';
   }).catch(() => 'unknown');
@@ -580,10 +595,13 @@ async function run() {
         const problemMap = new Map();
         for (const p of [...tableProblems, ...questionTabs]) {
           if (p?.solveUrl) {
-            const norm = normalizeScalerUrl(p.solveUrl);
-            if (norm && !problemMap.has(norm)) {
-              p.solveUrl = norm;
-              problemMap.set(norm, p);
+            const canon = canonicalProblemUrl(p.solveUrl);
+            if (canon && !problemMap.has(canon)) {
+              p.solveUrl = canon;
+              if (p.isSolved) {
+                runState.completedProblems.add(canon);
+              }
+              problemMap.set(canon, p);
             }
           }
         }
@@ -597,7 +615,7 @@ async function run() {
       console.log(`Found ${problems.length} assignment problem(s). Initiating Page Pool workers...`);
 
       // Filter unsolved
-      const pendingProblems = problems.filter((p) => !runState.completedProblems.has(p.solveUrl));
+      const pendingProblems = problems.filter((p) => !runState.completedProblems.has(canonicalProblemUrl(p.solveUrl)));
 
       if (pendingProblems.length === 0) {
         console.log('All extracted problems in this class are already completed from checkpoint.');
