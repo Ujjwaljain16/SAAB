@@ -9,7 +9,8 @@ const CURRICULUM_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const API_CACHE_PATH = path.join(process.cwd(), 'api-endpoints.json');
 const API_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-function parseProgressCount(text) {
+export function parseProgressCount(text) {
+  if (!text) return null;
   const match = text.replace(/\s+/g, ' ').trim().match(/(\d+)\s*\/\s*(\d+)/);
   if (!match) return null;
 

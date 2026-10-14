@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { chromium } from 'playwright';
-import { getQueue } from './crawler.js';
+import { getQueue, parseProgressCount } from './crawler.js';
 import { solve, solverStats, looksTruncated, solveMCQ, solveWorkspace } from './solver.js';
 import { injectAndSubmit } from './injector.js';
 import { slurpWorkspaceContext, injectWorkspaceContext, waitForWorkspaceReady } from './workspace_manager.js';
@@ -36,6 +36,7 @@ const SKIP_LABS = process.argv.includes('--skip-labs') || process.env.SKIP_LABS 
 const ONLY_MCQ = process.argv.includes('--only-mcq') || process.env.ONLY_MCQ === 'true';
 const ONLY_LABS = process.argv.includes('--only-labs') || process.env.ONLY_LABS === 'true';
 const IS_BITS = process.argv.includes('--bits') || process.env.BITS === 'true';
+const FORCE_RECHECK = process.argv.includes('--recheck') || process.argv.includes('--force');
 const RUN_STATE_PATH = path.join(process.cwd(), 'run-state.json');
 const SOLVE_CONCURRENCY = Math.max(1, Number(process.env.SOLVE_CONCURRENCY || 4));
 
@@ -518,7 +519,16 @@ async function run() {
     await ensureLoggedIn(mainPage, ctx, 'initial dashboard open');
 
     const queue = await getQueue(mainPage);
-    let filteredQueue = queue.filter(({ classUrl }) => !runState.completedClasses.has(classUrl));
+    let filteredQueue = queue.filter(({ classUrl, pending }) => {
+      if (FORCE_RECHECK) return true;
+      const progress = parseProgressCount(pending);
+      if (progress && progress.completed < progress.total) {
+        // If curriculum explicitly shows unsolved problems (e.g. 13/18), never skip it
+        runState.completedClasses.delete(classUrl);
+        return true;
+      }
+      return !runState.completedClasses.has(classUrl);
+    });
     if (SUBJECT_FILTER) {
       filteredQueue = filteredQueue.filter(({ subject }) => (subject || '').toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
       console.log(`--subject filter active: "${SUBJECT_FILTER}", ${filteredQueue.length} class(es) matched.`);
@@ -591,8 +601,13 @@ async function run() {
       });
 
       if (pendingProblems.length === 0) {
-        console.log('All problems in this class are already completed from checkpoint.');
-        markClassComplete(runState, classUrl);
+        console.log('All extracted problems in this class are already completed from checkpoint.');
+        const progress = parseProgressCount(pending);
+        if (!progress || progress.completed >= progress.total || problems.length >= progress.total) {
+          markClassComplete(runState, classUrl);
+        } else {
+          console.log(`Class has ${pending} on dashboard, but extracted table had 0 pending. Retaining class for recheck.`);
+        }
         continue;
       }
 
@@ -646,12 +661,14 @@ async function run() {
           if (ONLY_MCQ && type !== 'mcq') {
             console.log(`  [Worker ${workerId}] ⏭️ Skipping non-MCQ problem (--only-mcq active): ${problem.title}`);
             log.push({ title: problem.title, result: 'skipped' });
+            classAllPassed = false;
             continue;
           }
 
           if (ONLY_LABS && type !== 'lab' && type !== 'launcher' && type !== 'vscode') {
             console.log(`  [Worker ${workerId}] ⏭️ Skipping non-lab problem (--only-labs active): ${problem.title}`);
             log.push({ title: problem.title, result: 'skipped' });
+            classAllPassed = false;
             continue;
           }
 
@@ -704,6 +721,7 @@ async function run() {
             if (SKIP_LABS || ONLY_MCQ) {
               console.log(`  [Worker ${workerId}] ⏭️ Skipping VS Code IDE problem (${SKIP_LABS ? '--skip-labs' : '--only-mcq'} active): ${problem.title}`);
               log.push({ title: problem.title, result: 'skipped' });
+              classAllPassed = false;
               continue;
             }
 
@@ -913,11 +931,16 @@ async function run() {
         await workerPages[i].close().catch(() => {});
       }
 
-        if (!DRY_RUN && classAllPassed && pendingProblems.length > 0 && !globalHaltRun) {
+        const progress = parseProgressCount(pending);
+        const curriculumFullyDone = !progress || progress.completed >= progress.total;
+
+        if (!DRY_RUN && classAllPassed && pendingProblems.length > 0 && !globalHaltRun && curriculumFullyDone) {
           console.log(`✓ All problems passed for class: ${classUrl}. Marking class complete!`);
           markClassComplete(runState, classUrl);
         } else if (DRY_RUN && classAllPassed && pendingProblems.length > 0) {
           console.log(`↺ Dry-run preview completed for class: ${classUrl}`);
+        } else if (classAllPassed && !curriculumFullyDone) {
+          console.log(`Class ${classUrl} passed current batch, but curriculum indicates ${pending}. Class remains open.`);
         }
       } catch (classErr) {
         console.error(`  ⚠️ Error processing class ${classUrl}:`, classErr.message);
