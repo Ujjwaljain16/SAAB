@@ -383,7 +383,8 @@ async function getProblemSolveState(page) {
 }
 
 function buildProblemsUrl(assignmentUrl) {
-  const url = new URL(assignmentUrl);
+  const norm = normalizeScalerUrl(assignmentUrl);
+  const url = new URL(norm);
   url.pathname = url.pathname.replace(/\/assignment\/?$/i, '/assignment/problems');
   if (!url.searchParams.has('navref')) {
     url.searchParams.set('navref', 'cl_tt_nv');
@@ -580,7 +581,8 @@ async function run() {
         for (const p of [...tableProblems, ...questionTabs]) {
           if (p?.solveUrl) {
             const norm = normalizeScalerUrl(p.solveUrl);
-            if (!problemMap.has(norm)) {
+            if (norm && !problemMap.has(norm)) {
+              p.solveUrl = norm;
               problemMap.set(norm, p);
             }
           }
@@ -595,10 +597,7 @@ async function run() {
       console.log(`Found ${problems.length} assignment problem(s). Initiating Page Pool workers...`);
 
       // Filter unsolved
-      const pendingProblems = problems.filter((p) => {
-        const fullUrl = p.solveUrl.startsWith('http') ? p.solveUrl : `https://www.scaler.com${p.solveUrl}`;
-        return !runState.completedProblems.has(fullUrl);
-      });
+      const pendingProblems = problems.filter((p) => !runState.completedProblems.has(p.solveUrl));
 
       if (pendingProblems.length === 0) {
         console.log('All extracted problems in this class are already completed from checkpoint.');

@@ -1,9 +1,17 @@
 export function normalizeScalerUrl(url) {
-  const parsed = new URL(url);
+  if (!url || typeof url !== 'string') return '';
+  const trimmed = url.trim();
+  const full = trimmed.startsWith('http')
+    ? trimmed
+    : `https://www.scaler.com${trimmed.startsWith('/') ? '' : '/'}${trimmed}`;
 
-  if (parsed.hostname === 'scaler.com') {
-    parsed.hostname = 'www.scaler.com';
+  try {
+    const parsed = new URL(full);
+    if (parsed.hostname === 'scaler.com') {
+      parsed.hostname = 'www.scaler.com';
+    }
+    return parsed.toString();
+  } catch {
+    return full;
   }
-
-  return parsed.toString();
 }
