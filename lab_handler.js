@@ -25,15 +25,42 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
     try {
         console.log(`\n[Lab Solver] Starting automation for: ${problemTitle}`);
 
-        // 1. Purge SolveBot widget & floating distractions
+        // 1. Purge floating widgets and make this tab the foreground one: labs run one at a time, and a background tab
+        // may never start the container.
         await purgeBotWidgets(page);
+        await page.bringToFront().catch(() => {});
 
-        // 2. Click "Launch Lab" if present
-        const launchLocator = page.getByText('Launch Lab').first();
-        if (await launchLocator.isVisible({ timeout: 4000 }).catch(() => false)) {
-            console.log('[Lab Solver] Clicking Launch Lab button...');
-            await launchLocator.click().catch(() => {});
-            await page.waitForTimeout(T(2000));
+        // 2. Launch the lab and VERIFY it started. This used to be fire-and-forget (click errors swallowed, nothing checked), and
+        // getByText('Launch Lab').first() can match plain text in the problem statement instead of the real button.
+        const launchPredicate = () =>
+            document.querySelector('iframe[src*="maxwell"]') != null ||
+            /Launching the Lab/i.test(document.body.innerText) ||
+            document.querySelector('[class*="LaunchButton-module_btn"]') == null;
+        const launchStarted = () => page.evaluate(launchPredicate).catch(() => false);
+
+        let launchBtn = page.locator(SEL.labLaunchBtn).first();
+        if ((await launchBtn.count()) === 0) launchBtn = page.getByText('Launch Lab', { exact: true }).first();
+        if ((await launchBtn.count()) > 0 && !(await launchStarted())) {
+            // The button exists in the DOM before its click handler is attached: a click right after the page appears does nothing
+            // (seen live: the first lab was clicked 1s after detection and never launched; a lab clicked minutes later worked).
+            await page.waitForLoadState('networkidle', { timeout: Math.max(1, T(8000)) }).catch(() => {});
+            await page.waitForTimeout(T(1500));
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                console.log(`[Lab Solver] Clicking Launch Lab button (attempt ${attempt}/3)...`);
+                try {
+                    await launchBtn.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+                    await launchBtn.click({ timeout: 5000, force: attempt > 1 });
+                } catch (err) {
+                    console.log(`[Lab Solver] Launch click failed: ${String(err.message).split('\n')[0].slice(0, 140)}`);
+                }
+                await page.waitForTimeout(T(1500));
+                const started = await page.waitForFunction(launchPredicate, null, { timeout: Math.max(1, T(10000)) }).then(() => true).catch(() => false);
+                if (started) {
+                    console.log('[Lab Solver] Launch confirmed.');
+                    break;
+                }
+                console.log('[Lab Solver] The lab did not start after that click; trying again...');
+            }
         }
 
         // 3. Handle "End Previous Lab" or "Save and Open New Workspace" modal
@@ -47,12 +74,25 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
         // 4. Wait for Maxwell terminal iframe to initialize and spinner to clear
         console.log('[Lab Solver] Waiting for Maxwell container terminal to initialize...');
         let maxwellFrame = null;
-        for (let i = 0; i < (opts.frameWaitAttempts ?? 40); i++) {
-            await page.waitForTimeout(T(3000));
+        const waitStartedAt = Date.now();
+        for (let i = 0; i < (opts.frameWaitAttempts ?? 120); i++) {
+            await page.waitForTimeout(T(1000));
+
+            // "Only 1 lab session(s) is allowed at a time ... [End Previous Lab] [Cancel]" can appear at ANY moment after the launch click,
+            // not only right after it (seen live: it rendered late and the old single early check missed it, so the terminal never started
+            // and we waited the full 2 minutes). Check on every poll. Only "End Previous Lab" is ever clicked, never "Cancel".
+            const endPrevious = page.getByText('End Previous Lab').first();
+            if (await endPrevious.isVisible().catch(() => false)) {
+                console.log('[Lab Solver] Another lab session is running; ending it so this one can start...');
+                await endPrevious.click({ timeout: 3000 }).catch(() => {});
+                await page.waitForTimeout(T(2000));
+                continue;
+            }
+
             maxwellFrame = page.frames().find(f => f.url().includes('maxwell'));
             const isLaunching = await page.evaluate(() => document.body.innerText.includes('Launching the Lab')).catch(() => false);
             if (maxwellFrame && !isLaunching) {
-                console.log(`[Lab Solver] Maxwell container ready in ${(i + 1) * 3}s! Frame URL: ${maxwellFrame.url()}`);
+                console.log(`[Lab Solver] Maxwell container ready in ${Math.round((Date.now() - waitStartedAt) / 1000)}s! Frame URL: ${maxwellFrame.url()}`);
                 break;
             }
         }
@@ -64,117 +104,152 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
             };
         }
 
-        // 5. Query Gemini AI for exact Linux commands
-        console.log('[Lab Solver] Requesting terminal commands from Gemini AI...');
-        const labResult = await solveTerminalLab(problemTitle, problemStatement);
-        trace.cacheKey = labResult.cacheKey;
-        const { commands, rejected } = sanitizeLabCommands(labResult.commands);
-        trace.solution = { commands, reasoning: labResult.reasoning };
-        for (const r of rejected) {
-            console.log(`[Lab Solver] Refused unsafe/invalid command (${r.reason}): ${r.command}`);
-        }
-        if (rejected.length > 0) {
-            return { status: 'fail', verdict: 'Refused unsafe/invalid AI-generated commands' };
-        }
-        console.log(`[Lab Solver] Generated ${commands.length} commands. Reasoning: ${labResult.reasoning || ''}`);
+        // 5-8. Up to MAX tries (default 3): ask the AI for commands, type them, press Run Task / Submit, WAIT for the judge's result, and
+        // on a failure retry with the judge's own feedback (the container keeps its state, so a retry sends corrective commands).
+        const maxTries = opts.maxTries ?? 3;
+        const ranCommands = [];
+        let feedback = '';
+        let lastVerdict = { status: 'fail', verdict: 'Lab did not run' };
 
-        if (commands.length === 0) {
-            return {
-                status: 'fail',
-                verdict: 'AI generated empty command list'
-            };
-        }
+        for (let attempt = 1; attempt <= maxTries; attempt++) {
+            console.log(`[Lab Solver] Requesting terminal commands from the AI (try ${attempt}/${maxTries})...`);
+            const labResult = await solveTerminalLab(problemTitle, problemStatement, attempt === 1 ? {} : { feedback, previousCommands: ranCommands });
+            if (attempt === 1) trace.cacheKey = labResult.cacheKey;
 
-        // 6. Focus terminal in Maxwell iframe
-        console.log('[Lab Solver] Focusing Maxwell terminal...');
-        const terminal = maxwellFrame.locator('.xterm, textarea.xterm-helper-textarea, canvas.xterm-text-layer').first();
-        await terminal.click({ force: true }).catch(() => {});
-        await page.waitForTimeout(T(800));
-
-        // 7. Type commands line by line — use maxwellFrame.keyboard so input goes to the iframe's xterm, not the main page
-        console.log(`[Lab Solver] Executing ${commands.length} bash commands...`);
-        for (const cmd of commands) {
-            console.log(`  > ${cmd}`);
-            // Type char-by-char via the frame's keyboard context
-            await maxwellFrame.locator('textarea.xterm-helper-textarea').first().focus().catch(() => {});
-            // A Playwright Frame has no .keyboard (that threw "Cannot read properties of undefined (reading 'type')" on every lab).
-            // The xterm textarea inside the iframe is focused above, so the page-level keyboard types into it.
-            await page.keyboard.type(cmd, { delay: 30 });
-            await page.keyboard.press('Enter');
-            // Wait for command to finish — simple heuristic: 600ms per command, more for installs
-            const isSlowCmd = /apt|apt-get|yum|dnf|pip|npm|wget|curl|git clone|make|docker|systemctl/i.test(cmd);
-            await page.waitForTimeout(T(isSlowCmd ? 3500 : 700));
-        }
-
-        await page.waitForTimeout(T(2500));
-
-        // 8. Multi-Task Execution & Submission Loop
-        console.log('[Lab Solver] Starting task execution and submission loop...');
-        for (let taskLoop = 1; taskLoop <= 10; taskLoop++) {
-            const currentStatus = { isSolved: (await getProblemSolveState(page, { wait: false })) === 'solved' };
-
-            if (currentStatus.isSolved) {
-                console.log('[Lab Solver] ✓ Lab is fully SOLVED!');
-                return { status: 'pass', verdict: 'Correct Answer' };
+            const { commands, rejected } = sanitizeLabCommands(labResult.commands);
+            for (const r of rejected) {
+                console.log(`[Lab Solver] Refused unsafe/invalid command (${r.reason}): ${r.command}`);
+            }
+            if (rejected.length > 0) {
+                return { status: 'fail', verdict: 'Refused unsafe/invalid AI-generated commands' };
+            }
+            if (commands.length === 0) {
+                // No (more) commands: on a retry that means the AI had nothing to add, so report the judge's last verdict instead.
+                if (attempt > 1) return lastVerdict;
+                return { status: 'fail', verdict: 'AI generated empty command list' };
             }
 
-            let submitBtn = page.locator(SEL.labSubmitBtn).first();
-            if ((await submitBtn.count()) === 0) submitBtn = page.locator(SEL.labSubmitFallback).first();
-            if (!(await submitBtn.isVisible().catch(() => false))) {
-                console.log('[Lab Solver] Submit button not visible on loop', taskLoop);
-                break;
-            }
+            console.log(`[Lab Solver] Generated ${commands.length} commands. Reasoning: ${labResult.reasoning || ''}`);
+            ranCommands.push(...commands);
+            // Everything typed so far, in order: replaying it on a fresh container is what a cached solution has to do.
+            trace.solution = { commands: ranCommands.slice(), reasoning: labResult.reasoning };
 
-            // Wait if button is disabled
-            for (let r = 0; r < 5; r++) {
-                const isDisabled = await submitBtn.evaluate(el => /disabled/i.test(el.className) || el.disabled || el.getAttribute('aria-disabled') === 'true');
-                if (!isDisabled) break;
-                await page.waitForTimeout(T(1000));
-            }
+            await typeCommands(page, maxwellFrame, commands, T);
+            await page.waitForTimeout(T(2500));
 
-            console.log(`[Lab Solver] Clicking submission button (Task iteration ${taskLoop})...`);
-            await submitBtn.click({ force: true });
+            console.log('[Lab Solver] Submitting and waiting for the judge...');
+            lastVerdict = await submitAndAwaitVerdict(page, T, opts);
+            if (lastVerdict.status === 'pass' || lastVerdict.stop) return lastVerdict;
 
-            await page.waitForTimeout(T(1500));
-
-            // Scaler: "Running a completed task will reset progress for all the next tasks." Never confirm that; cancel and stop.
-            const resetCancel = page.locator(SEL.labResetCancelBtn).first();
-            if (await resetCancel.isVisible().catch(() => false)) {
-                console.log('[Lab Solver] Scaler warns this would reset completed tasks. Cancelling to protect existing progress.');
-                await resetCancel.click({ force: true }).catch(() => {});
-                return { status: 'fail', verdict: 'Stopped: running again would reset already-completed tasks' };
-            }
-
-            // Any other plain confirmation dialog.
-            const proceedModal = page.locator(SEL.labProceedBtn).first();
-            if (await proceedModal.isVisible().catch(() => false)) {
-                console.log('[Lab Solver] Confirming Proceed modal...');
-                await proceedModal.click({ force: true });
-            }
-
-            // Wait for evaluation
-            await page.waitForTimeout(T(4000));
-            const evalState = await page.evaluate((testCaseSel) => {
-                const testCases = document.querySelector(testCaseSel)?.innerText || '';
-                const hasFailed = /Wrong Answer|Test Case Failed/i.test(testCases);
-                return { hasFailed, testCases: testCases.slice(0, 200) };
-            }, SEL.labTestCases);
-            evalState.isSolved = (await getProblemSolveState(page, { wait: false })) === 'solved';
-
-            if (evalState.isSolved) {
-                console.log('[Lab Solver] ✓ Lab is fully SOLVED!');
-                return { status: 'pass', verdict: 'Correct Answer' };
-            }
-
-            if (evalState.hasFailed) {
-                console.log('[Lab Solver] ✗ Test case failed with feedback:', evalState.testCases);
-                return { status: 'fail', verdict: 'Wrong Answer', feedback: evalState.testCases };
-            }
+            feedback = lastVerdict.feedback || lastVerdict.verdict;
+            console.log(`[Lab Solver] ✗ Try ${attempt}/${maxTries} did not solve it: ${String(feedback).slice(0, 200)}`);
         }
 
-        return { status: 'fail', verdict: 'Evaluation timeout' };
+        return lastVerdict;
 
     } catch (err) {
         return { status: 'fail', verdict: `Lab execution error: ${err.message}` };
     }
+}
+
+/** Focus the xterm inside the Maxwell iframe and type each command, pausing longer for slow ones. */
+async function typeCommands(page, maxwellFrame, commands, T) {
+    console.log('[Lab Solver] Focusing Maxwell terminal...');
+    const terminal = maxwellFrame.locator('.xterm, textarea.xterm-helper-textarea, canvas.xterm-text-layer').first();
+    await terminal.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(T(800));
+
+    console.log(`[Lab Solver] Executing ${commands.length} bash commands...`);
+    for (const cmd of commands) {
+        console.log(`  > ${cmd}`);
+        await maxwellFrame.locator('textarea.xterm-helper-textarea').first().focus().catch(() => {});
+        // A Playwright Frame has no .keyboard (that threw "Cannot read properties of undefined (reading 'type')" on every lab).
+        // The xterm textarea inside the iframe is focused above, so the page-level keyboard types into it.
+        await page.keyboard.type(cmd, { delay: 30 });
+        await page.keyboard.press('Enter');
+        // Wait for the command to finish: 700ms per command, longer for installs and the like.
+        const isSlowCmd = /apt|apt-get|yum|dnf|pip|npm|wget|curl|git clone|make|docker|systemctl/i.test(cmd);
+        await page.waitForTimeout(T(isSlowCmd ? 3500 : 700));
+    }
+}
+
+/**
+ * Press Run Task / Submit ONCE, then wait for the judge to actually produce a result. The old version waited a fixed 4s and, if it
+ * saw neither "solved" nor one guessed failure phrase, clicked again (up to 10 times), which could re-run a task that was still
+ * being judged. A result here is: the Solved tag appears, or the test-case panel changes to something that is not the "click Submit
+ * to see the output" placeholder, is not a "running" message, and stays unchanged for a few seconds.
+ *
+ * @returns {{status:'pass'|'fail', verdict:string, feedback?:string, stop?:boolean}}
+ */
+async function submitAndAwaitVerdict(page, T, opts = {}) {
+    const isSolved = async () => (await getProblemSolveState(page, { wait: false })) === 'solved';
+    const readPanel = () => page.evaluate((sel) => (document.querySelector(sel)?.innerText || '').replace(/\s+/g, ' ').trim(), SEL.labTestCases).catch(() => '');
+    const PLACEHOLDER = /click on\s+["']?submit["']?\s+button to see the output/i;
+    const RUNNING = /running|evaluating|executing|checking|processing|loading|please wait|in progress/i;
+
+    // opts.forceSubmit is a test-only switch (see main.js --e2e-submit-lab): press the button even though the lab is already solved.
+    if (!opts.forceSubmit && (await isSolved())) {
+        console.log('[Lab Solver] ✓ Lab is already SOLVED!');
+        return { status: 'pass', verdict: 'Correct Answer' };
+    }
+
+    let submitBtn = page.locator(SEL.labSubmitBtn).first();
+    if ((await submitBtn.count()) === 0) submitBtn = page.locator(SEL.labSubmitFallback).first();
+    if (!(await submitBtn.isVisible().catch(() => false))) {
+        return { status: 'fail', verdict: 'Submit button not found', feedback: 'The Run Task / Submit button is not visible on the page.' };
+    }
+
+    for (let r = 0; r < 5; r++) {
+        const isDisabled = await submitBtn.evaluate((el) => /disabled/i.test(el.className) || el.disabled || el.getAttribute('aria-disabled') === 'true').catch(() => false);
+        if (!isDisabled) break;
+        await page.waitForTimeout(T(1000));
+    }
+
+    const before = await readPanel();
+    console.log('[Lab Solver] Clicking the submission button...');
+    const clickedAt = Date.now();
+    await submitBtn.click({ force: true });
+    await page.waitForTimeout(T(1500));
+
+    // Scaler: "Running a completed task will reset progress for all the next tasks." Never confirm that; cancel and stop.
+    const resetCancel = page.locator(SEL.labResetCancelBtn).first();
+    if (await resetCancel.isVisible().catch(() => false)) {
+        console.log('[Lab Solver] Scaler warns this would reset completed tasks. Cancelling to protect existing progress.');
+        await resetCancel.click({ force: true }).catch(() => {});
+        return { status: 'fail', stop: true, verdict: 'Stopped: running again would reset already-completed tasks' };
+    }
+
+    // Any other plain confirmation dialog.
+    const proceedModal = page.locator(SEL.labProceedBtn).first();
+    if (await proceedModal.isVisible().catch(() => false)) {
+        console.log('[Lab Solver] Confirming Proceed modal...');
+        await proceedModal.click({ force: true });
+    }
+
+    const deadline = Date.now() + T(opts.evalTimeoutMs ?? 90000);
+    let last = null;
+    let lastChangeAt = Date.now();
+    while (Date.now() < deadline) {
+        if (await isSolved()) {
+            console.log('[Lab Solver] ✓ Lab is SOLVED!');
+            return { status: 'pass', verdict: 'Correct Answer' };
+        }
+
+        const text = await readPanel();
+        if (text !== last) {
+            last = text;
+            lastChangeAt = Date.now();
+        }
+
+        // A result is normally a CHANGE of the panel. But a retry can fail with exactly the same message as the previous try, which
+        // changes nothing visible; after a generous grace period an unchanged, settled, non-placeholder panel counts as the answer too.
+        const unchangedButSettled = text === before && Date.now() - clickedAt >= T(12000);
+        const isResult = text && (text !== before || unchangedButSettled) && !PLACEHOLDER.test(text) && !RUNNING.test(text);
+        if (isResult && Date.now() - lastChangeAt >= T(3000)) {
+            return { status: 'fail', verdict: 'Wrong Answer', feedback: text.slice(0, 600) };
+        }
+        await page.waitForTimeout(T(1000));
+    }
+
+    return { status: 'fail', verdict: 'Evaluation timeout', feedback: last ? last.slice(0, 600) : 'The judge produced no result in time.' };
 }

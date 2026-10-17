@@ -11,13 +11,26 @@ import { launchBrowser } from './helpers/browser.js';
 // Isolate every file the solver/cache writes, and make sure no real AI provider can be called.
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'saab-lab-test-'));
 process.env.SAAB_DATA_DIR = dataDir;
-for (const k of ['GEMINI_API_KEY', 'GEMINI_API_KEYS', 'GROQ_API_KEY', 'GROK_API_KEY', 'XAI_API_KEY']) process.env[k] = '';
+for (const k of ['GEMINI_API_KEY', 'GEMINI_API_KEYS', 'GROK_API_KEY', 'XAI_API_KEY']) process.env[k] = '';
+// A fake Groq answers lab prompts (see the fetch stub below); no real provider is ever contacted.
+process.env.GROQ_API_KEY = 'test-key';
+process.env.GROQ_MODEL = 'm1';
+process.env.GROQ_MODELS = 'm1';
 process.env.API_SPACING_MS = '0';
 
 const { solveAndSubmitLab } = await import('../lab_handler.js');
 const { commitSolution, makeLabCacheKey } = await import('../solver.js');
 
 const FAST = { timeScale: 0.01, frameWaitAttempts: 3 };
+
+// Fake AI: only a RETRY prompt (one that carries the judge's feedback) gets commands; a first-attempt prompt gets none.
+const aiPrompts = [];
+globalThis.fetch = async (url, init) => {
+  const prompt = JSON.parse(init.body).messages[0].content;
+  aiPrompts.push(prompt);
+  const commands = /This is a RETRY/.test(prompt) ? ['touch /tmp/a'] : [];
+  return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ commands, reasoning: 'fake' }) } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+};
 const TERMINAL_HTML = `<div class="xterm"><textarea class="xterm-helper-textarea"></textarea></div>
 <script>
   window.typed = [];
@@ -165,5 +178,103 @@ test('a lab title containing the word "solved" does not count as a solved lab', 
   const result = await solveAndSubmitLab(page, 'Real lab title', 'chown a file', FAST);
 
   assert.notEqual(result.status, 'pass', 'title words are not a Solved status');
+  await page.close();
+});
+
+// ---- Submit once, then WAIT for the judge; retry with the judge's feedback ---------------------------------------------------------
+const runsOf = (page) => page.evaluate(() => window.__runs || 0);
+const COUNT = 'window.__runs = (window.__runs || 0) + 1;';
+
+test('a failed try is retried with the judge\'s own feedback and the extra commands are typed into the same terminal', async () => {
+  const key = seed('Lab retry', 'make /tmp/a exist', ['echo first']);
+  aiPrompts.length = 0;
+  const page = await realLabPage(`${COUNT}
+    if (window.__runs === 1) document.getElementById('tc').textContent = 'Test case failed: expected /tmp/a to exist';
+    if (window.__runs === 2) document.getElementById('tag').innerHTML = '<span class="status-tag-2 status-tag-2--success">Solved</span>';`);
+
+  const result = await solveAndSubmitLab(page, 'Lab retry', 'make /tmp/a exist', { ...FAST, maxTries: 3 });
+
+  assert.equal(result.status, 'pass', JSON.stringify(result));
+  assert.equal(await runsOf(page), 2, 'submitted once per try, never blindly in between');
+  assert.equal(await typedInTerminal(page), 'echo first\ntouch /tmp/a\n', 'first the cached commands, then the corrective ones');
+
+  const retryPrompt = aiPrompts.at(-1);
+  assert.match(retryPrompt, /This is a RETRY/);
+  assert.match(retryPrompt, /expected \/tmp\/a to exist/, 'the judge\'s feedback reaches the AI');
+  assert.match(retryPrompt, /echo first/, 'and so does what was already run');
+
+  const saved = JSON.parse(fs.readFileSync(cacheFile(key), 'utf-8'));
+  assert.deepEqual(saved.commands, ['echo first', 'touch /tmp/a'], 'the verified solution replays everything that was needed');
+  await page.close();
+});
+
+test('a slow judge is waited for: the button is pressed once, not again while grading is still running', async () => {
+  seed('Lab slow', 'x', ['echo hi']);
+  const page = await realLabPage(`${COUNT}
+    document.getElementById('tc').textContent = 'Running tests...';
+    setTimeout(() => { document.getElementById('tc').textContent = 'Test Case Failed: output differs'; }, 250);`);
+
+  const result = await solveAndSubmitLab(page, 'Lab slow', 'x', { ...FAST, maxTries: 1 });
+
+  assert.equal(result.status, 'fail');
+  assert.match(result.feedback, /output differs/, 'the final result is reported, not the transient "Running" text');
+  assert.equal(await runsOf(page), 1);
+  await page.close();
+});
+
+test('an unexpected failure wording is still recognised as a result (no guessed phrase needed) and does not trigger re-clicks', async () => {
+  seed('Lab wording', 'x', ['echo hi']);
+  const page = await realLabPage(`${COUNT} document.getElementById('tc').textContent = 'Oops: file /tmp/x is missing (code 7)';`);
+
+  const result = await solveAndSubmitLab(page, 'Lab wording', 'x', { ...FAST, maxTries: 1 });
+
+  assert.equal(result.status, 'fail');
+  assert.match(result.feedback, /code 7/);
+  assert.equal(await runsOf(page), 1, 'the old loop would have clicked up to 10 times here');
+  await page.close();
+});
+
+test('if the judge never answers the lab times out after ONE click', async () => {
+  seed('Lab silent', 'x', ['echo hi']);
+  const page = await realLabPage(`${COUNT} /* the judge says nothing */`);
+
+  const result = await solveAndSubmitLab(page, 'Lab silent', 'x', { ...FAST, maxTries: 1 });
+
+  assert.equal(result.status, 'fail');
+  assert.equal(result.verdict, 'Evaluation timeout');
+  assert.equal(await runsOf(page), 1);
+  await page.close();
+});
+
+test('the "Only 1 lab session is allowed" prompt is answered even when it appears LATE (regression: the lab waited 2 minutes for a terminal that could not start)', async () => {
+  seed('Lab late prompt', 'x', ['echo hi']);
+  const page = await browser.newPage();
+  await page.route('https://scaler.test/**', (r) => r.fulfill({ contentType: 'text/html', body: `
+    <div class="cr-p-heading" id="h">Q2. Using chown <span id="tag"><span class="status-tag-2 status-tag-2--attention">Unsolved</span></span></div>
+    <div class="cr-infra-mage-judge" id="stage"><div class="LaunchButton-module_container__CP50v"><a id="launch" class="Tappable-module_root__N7ll5 LaunchButton-module_btn__o1LoJ">Launch Lab</a></div></div>
+    <div class="StageTestCases-module_container__8VzxM"><div class="StageTestCases-module_testCasesContainer__ePRAS" id="tc">Click on "Submit" button to see the output here...</div></div>
+    <a class="Tappable-module_root__N7ll5 Submit-module_btn__tpMzw" id="run">Run Task</a>
+    <script>
+      window.__ended = false;
+      document.getElementById('launch').onclick = () => {
+        document.getElementById('stage').innerHTML = '';
+        // the prompt shows up well after the launch click, i.e. AFTER the handler's one-off early check
+        setTimeout(() => {
+          document.getElementById('stage').innerHTML = '<div>Only 1 lab session(s) is allowed at a time</div><a id="endprev">End Previous Lab</a><a id="cancel">Cancel</a>';
+          document.getElementById('endprev').onclick = () => {
+            window.__ended = true;
+            document.getElementById('stage').innerHTML = '<iframe src="https://abc.maxwell.test/term"></iframe>';
+          };
+        }, 400);
+      };
+      document.getElementById('run').onclick = () => { document.getElementById('tag').innerHTML = '<span class="status-tag-2 status-tag-2--success">Solved</span>'; };
+    </script>` }));
+  await page.route('https://abc.maxwell.test/**', (r) => r.fulfill({ contentType: 'text/html', body: TERMINAL_HTML }));
+  await page.goto('https://scaler.test/lab');
+
+  const result = await solveAndSubmitLab(page, 'Lab late prompt', 'x', { timeScale: 0.01, frameWaitAttempts: 200 });
+
+  assert.equal(result.status, 'pass', JSON.stringify(result));
+  assert.equal(await page.evaluate(() => window.__ended), true, 'End Previous Lab was clicked when it appeared');
   await page.close();
 });
