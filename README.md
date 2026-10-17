@@ -253,3 +253,12 @@ Google applies limits **per project, not per API key**, so extra keys only add c
 - when every provider is out for the day the run stops cleanly and resumes from its checkpoint
 
 **What can't be guaranteed.** Google's free-tier numbers are per model, unpublished on the docs page, and "not guaranteed", so there is no universally safe default: read them in AI Studio and set `GEMINI_RPM` / `GEMINI_RPD`. Tokens-per-minute is not tracked (image questions cost more), and anything else using the same project (a browser tab in AI Studio, another script) spends the same quota.
+
+---
+
+## 🎯 What gets solved (and what never does)
+
+- **Only assignments.** The "Additional Problems" (homework) section of a class is **not** solved by default; its links are ignored.
+- **Never an already-solved problem.** If the problems table, the question dock or the problem page says *Solved* (status tag only, never free text in the title), it is skipped; the state is re-checked right before every AI call and every submit.
+- **MCQs:** up to **3 tries** (`MCQ_MAX_TRIES`). Every wrong answer is remembered and excluded from the next try; after that the question is left alone, including on later runs. A verdict is read from what *changed* after the click (Solved, or the attempts counter dropping), never from a badge that was already there.
+- **Labs:** if Scaler warns that running again would reset completed tasks, SAAB cancels and stops instead of confirming.
