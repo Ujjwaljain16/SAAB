@@ -96,8 +96,10 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
             console.log(`  > ${cmd}`);
             // Type char-by-char via the frame's keyboard context
             await maxwellFrame.locator('textarea.xterm-helper-textarea').first().focus().catch(() => {});
-            await maxwellFrame.keyboard.type(cmd, { delay: 30 });
-            await maxwellFrame.keyboard.press('Enter');
+            // A Playwright Frame has no .keyboard (that threw "Cannot read properties of undefined (reading 'type')" on every lab).
+            // The xterm textarea inside the iframe is focused above, so the page-level keyboard types into it.
+            await page.keyboard.type(cmd, { delay: 30 });
+            await page.keyboard.press('Enter');
             // Wait for command to finish — simple heuristic: 600ms per command, more for installs
             const isSlowCmd = /apt|apt-get|yum|dnf|pip|npm|wget|curl|git clone|make|docker|systemctl/i.test(cmd);
             await page.waitForTimeout(T(isSlowCmd ? 3500 : 700));
