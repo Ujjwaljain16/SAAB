@@ -2,6 +2,7 @@ import { solveTerminalLab, commitSolution, evictSolution } from './solver.js';
 import { sanitizeLabCommands } from './lab_guard.js';
 import { SEL } from './config.js';
 import { purgeBotWidgets } from './page_utils.js';
+import { getProblemSolveState } from './scaler_page.js';
 
 /**
  * Robust handler to automate DevOps Maxwell Container Labs on Scaler
@@ -110,17 +111,15 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
         // 8. Multi-Task Execution & Submission Loop
         console.log('[Lab Solver] Starting task execution and submission loop...');
         for (let taskLoop = 1; taskLoop <= 10; taskLoop++) {
-            const currentStatus = await page.evaluate(() => {
-                const heading = document.querySelector('.cr-p-heading')?.innerText || '';
-                return { isSolved: heading.includes('Solved') };
-            });
+            const currentStatus = { isSolved: (await getProblemSolveState(page, { wait: false })) === 'solved' };
 
             if (currentStatus.isSolved) {
                 console.log('[Lab Solver] ✓ Lab is fully SOLVED!');
                 return { status: 'pass', verdict: 'Correct Answer' };
             }
 
-            const submitBtn = page.locator(SEL.labSubmitBtn).first();
+            let submitBtn = page.locator(SEL.labSubmitBtn).first();
+            if ((await submitBtn.count()) === 0) submitBtn = page.locator(SEL.labSubmitFallback).first();
             if (!(await submitBtn.isVisible().catch(() => false))) {
                 console.log('[Lab Solver] Submit button not visible on loop', taskLoop);
                 break;
@@ -136,8 +135,17 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
             console.log(`[Lab Solver] Clicking submission button (Task iteration ${taskLoop})...`);
             await submitBtn.click({ force: true });
 
-            // Handle any Proceed modal or StageResetWarning modal
             await page.waitForTimeout(T(1500));
+
+            // Scaler: "Running a completed task will reset progress for all the next tasks." Never confirm that; cancel and stop.
+            const resetCancel = page.locator(SEL.labResetCancelBtn).first();
+            if (await resetCancel.isVisible().catch(() => false)) {
+                console.log('[Lab Solver] Scaler warns this would reset completed tasks. Cancelling to protect existing progress.');
+                await resetCancel.click({ force: true }).catch(() => {});
+                return { status: 'fail', verdict: 'Stopped: running again would reset already-completed tasks' };
+            }
+
+            // Any other plain confirmation dialog.
             const proceedModal = page.locator(SEL.labProceedBtn).first();
             if (await proceedModal.isVisible().catch(() => false)) {
                 console.log('[Lab Solver] Confirming Proceed modal...');
@@ -147,11 +155,11 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
             // Wait for evaluation
             await page.waitForTimeout(T(4000));
             const evalState = await page.evaluate((testCaseSel) => {
-                const heading = document.querySelector('.cr-p-heading')?.innerText || '';
                 const testCases = document.querySelector(testCaseSel)?.innerText || '';
                 const hasFailed = /Wrong Answer|Test Case Failed/i.test(testCases);
-                return { isSolved: heading.includes('Solved'), hasFailed, testCases: testCases.slice(0, 200) };
+                return { hasFailed, testCases: testCases.slice(0, 200) };
             }, SEL.labTestCases);
+            evalState.isSolved = (await getProblemSolveState(page, { wait: false })) === 'solved';
 
             if (evalState.isSolved) {
                 console.log('[Lab Solver] ✓ Lab is fully SOLVED!');

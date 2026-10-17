@@ -34,8 +34,14 @@ export const SEL = {
   botWidgets:     '[class*="SolveBot"], [class*="Companion-module_root"]',
   ideContainer:   '#vscode-ide, [class*="EditorLayout-module_container"], .code-editor-layer',
   labLaunchBtn:   '[class*="LaunchButton-module_btn"]',
-  labSubmitBtn:   'a[class*="Submit-module_btn"], button[class*="Submit-module_btn"], button:has-text("Run Task"), a:has-text("Run Task"), button:has-text("Submit")',
-  labProceedBtn:  'a[class*="StageResetWarningModal-module_proceedButton"], a:has-text("Proceed"), button:has-text("Proceed")',
+  // Real lab page: the Run Task button is `a.Tappable-module_root.Submit-module_btn...`. A HIDDEN "Run Task" link inside
+  // StageResetWarningModal comes BEFORE it in the DOM, so a text-based selector must never be the primary one (.first() would
+  // grab the hidden modal link). Text selectors are only a fallback and explicitly exclude the modal.
+  labSubmitBtn:   'a[class*="Submit-module_btn"], button[class*="Submit-module_btn"]',
+  labSubmitFallback: 'button:has-text("Run Task"), a:has-text("Run Task"):not([class*="StageResetWarningModal"]), button:has-text("Submit")',
+  // Scaler warns "Running a completed task will reset progress for all the next tasks". We Cancel it, never confirm it.
+  labResetCancelBtn: 'a[class*="StageResetWarningModal-module_cancelButton"]',
+  labProceedBtn:  'a:has-text("Proceed"):not([class*="StageResetWarningModal"]), button:has-text("Proceed")',
   labTestCases:   '[class*="TestCases-module_container"], [class*="TestCase"]',
 };
 
