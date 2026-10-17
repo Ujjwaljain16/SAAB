@@ -3,7 +3,7 @@ import { chromium } from 'playwright';
 import { getQueue, parseProgressCount } from './crawler.js';
 import {
   solve, solverStats, looksTruncated, solveMCQ, solveWorkspace,
-  commitSolution, evictSolution, recordWrongMCQOption, assertProviderConfigured
+  commitSolution, evictSolution, recordWrongMCQOption, assertProviderConfigured, allProvidersExhausted
 } from './solver.js';
 import { injectAndSubmit } from './injector.js';
 import { slurpWorkspaceContext, injectWorkspaceContext, waitForWorkspaceReady } from './workspace_manager.js';
@@ -16,7 +16,7 @@ import { makeRunState, markClassComplete, markProblemComplete } from './run_stat
 import {
   previewCode, classifyFailureFeedback, resolveTargetLanguage, selectProblemLanguage,
   getCurrentSelectedLanguageLabel, extractProblemContent, extractTestCases, extractEditorStarterCode,
-  collectAssignmentProblems, collectQuestionTabs, getProblemSolveState, buildProblemsUrl, isLoginUrl, detectProblemType
+  collectAssignmentProblems, collectQuestionTabs, getProblemSolveState, buildProblemsUrl, isLoginUrl, detectProblemType, isProblemHref
 } from './scaler_page.js';
 import { pathToFileURL } from 'url';
 import { normalizeScalerUrl, canonicalProblemUrl } from './scaler_url.js';
@@ -229,7 +229,7 @@ async function run() {
   const log = [];
 
   try {
-    const mainPage = ctx.pages()[0] || await ctx.newPage();
+    let mainPage = ctx.pages()[0] || await ctx.newPage();
 
     console.log('Checking session on curriculum dashboard...');
     await safeGoto(mainPage, normalizeScalerUrl('https://www.scaler.com/academy/mentee-dashboard/core-curriculum/'));
@@ -259,6 +259,16 @@ async function run() {
 
     for (const { classUrl, pending, subject } of filteredQueue) {
       if (globalHaltRun) break;
+
+      if (mainPage.isClosed()) {
+        try {
+          mainPage = await ctx.newPage();
+        } catch {
+          globalHaltRun = true;
+          globalHaltReason = 'The browser window was closed';
+          break;
+        }
+      }
 
       metrics.classesSeen += 1;
       console.log(`\n============================================================`);
@@ -295,7 +305,7 @@ async function run() {
         const questionTabs = await collectQuestionTabs(mainPage);
         const problemMap = new Map();
         for (const p of [...tableProblems, ...questionTabs]) {
-          if (p?.solveUrl) {
+          if (p?.solveUrl && isProblemHref(p.solveUrl)) {
             const canon = canonicalProblemUrl(p.solveUrl);
             if (canon && !problemMap.has(canon)) {
               p.solveUrl = canon;
@@ -343,8 +353,15 @@ async function run() {
       let problemQueueIndex = 0;
       let classAllPassed = true;
 
-      async function runWorker(page, workerId) {
+      async function runWorker(initialPage, workerId) {
+        let page = initialPage;
+        let pageRecoveries = 0;
         while (!globalHaltRun) {
+          if (allProvidersExhausted()) {
+            globalHaltRun = true;
+            globalHaltReason = 'All AI providers are out of daily quota. Add GROQ_API_KEY (free) or more GEMINI_API_KEYS, or resume tomorrow - progress is checkpointed.';
+            break;
+          }
           if (MAX_SUBMISSIONS && metrics.submitAttempts >= MAX_SUBMISSIONS) {
             globalHaltRun = true;
             globalHaltReason = `Reached submission cap (${MAX_SUBMISSIONS})`;
@@ -545,6 +562,10 @@ async function run() {
             const mcqResult = await solveMCQ(problemContent);
 
             if (mcqResult.failed) {
+              if (mcqResult.fatal) {
+                globalHaltRun = true;
+                globalHaltReason = 'All AI providers are out of daily quota. Add GROQ_API_KEY (free) or more GEMINI_API_KEYS, or resume tomorrow - progress is checkpointed.';
+              }
               metrics.problemsFailed += 1;
               classAllPassed = false;
               log.push({ title: problem.title, result: 'fail' });
@@ -669,11 +690,35 @@ async function run() {
             markProblemComplete(runState, solveUrl);
           }
           } catch (err) {
-            metrics.problemsFailed += 1;
-            classAllPassed = false;
-            log.push({ title: problem?.title || 'unknown', result: 'fail' });
-            console.error(`  [Worker ${workerId}] ✗ Unexpected error on "${problem?.title}": ${err.message}`);
-            await snapshotPage(page, 'worker-error', `${problem?.title} :: ${err.message}`);
+            const pageDied = page.isClosed();
+            if (pageDied && problem && !problem.requeued) {
+              // The browser page died under us (not the problem's fault): give the problem one more chance on a fresh page.
+              problem.requeued = true;
+              pendingProblems.push(problem);
+              console.warn(`  [Worker ${workerId}] Page closed while on "${problem.title}"; re-queued once.`);
+            } else {
+              metrics.problemsFailed += 1;
+              classAllPassed = false;
+              log.push({ title: problem?.title || 'unknown', result: 'fail' });
+              console.error(`  [Worker ${workerId}] ✗ Unexpected error on "${problem?.title}": ${err.message}`);
+              await snapshotPage(page, 'worker-error', `${problem?.title} :: ${err.message}`);
+            }
+
+            if (pageDied) {
+              if (pageRecoveries >= 2) {
+                console.error(`  [Worker ${workerId}] Its page keeps closing. Stopping this worker.`);
+                break;
+              }
+              pageRecoveries += 1;
+              try {
+                page = await ctx.newPage();
+                workerPages[workerId] = page;
+                console.log(`  [Worker ${workerId}] Opened a fresh page (recovery ${pageRecoveries}/2).`);
+              } catch (openErr) {
+                console.error(`  [Worker ${workerId}] Cannot open a new page (${openErr.message}). Stopping this worker.`);
+                break;
+              }
+            }
           }
         }
       }
@@ -681,6 +726,7 @@ async function run() {
       // Execute all workers concurrently
       const workers = workerPages.map((workerPage, i) => runWorker(workerPage, i));
       await Promise.all(workers);
+      if (!workerPages[0].isClosed()) mainPage = workerPages[0];
 
       // Close extra worker pages to release memory, keeping mainPage
       for (let i = 1; i < workerPages.length; i++) {
