@@ -387,6 +387,7 @@ async function generateWithGrok(promptText) {
     const retryHeader = Number(res.headers.get('retry-after') || 0);
     const errMsg = String(data?.error?.message || data?.message || `Grok HTTP ${res.status}`);
     if (res.status === 429 && isDailyQuotaMessage(errMsg)) grokDead = true;
+    if (res.status === 429) penalizeLane('grok', Number(res.headers.get('retry-after')) || parseRetryDelayFromText(errMsg, 5));
     const retryAfterSeconds = retryHeader > 0 ? retryHeader : parseRetryDelayFromText(errMsg, 5);
 
     if (res.status === 429) {
@@ -482,6 +483,7 @@ async function generateWithGroq(promptText, modelName = GROQ_MODEL, maxTokens = 
     const retryHeader = Number(res.headers.get('retry-after') || 0);
     const errMsg = String(data?.error?.message || data?.message || `Groq HTTP ${res.status}`);
     if (res.status === 429 && isDailyQuotaMessage(errMsg)) deadGroqModels.add(modelName);
+    if (res.status === 429) penalizeLane('groq', Number(res.headers.get('retry-after')) || parseRetryDelayFromText(errMsg, 5));
     const retryAfterSeconds = retryHeader > 0 ? retryHeader : parseRetryDelayFromText(errMsg, 5);
 
     if (res.status === 429) {
@@ -618,15 +620,46 @@ export function recordWrongMCQOption(cacheKey, optionIndex) {
 // instead of every call in the process being serialized behind one global timer.
 const MIN_API_SPACING_MS = Math.max(0, envNumber('API_SPACING_MS', 2200));
 const paceLanes = new Map();
+const laneState = new Map();
 
-function paceApiCall(lane = 'default') {
-  const previous = paceLanes.get(lane) || Promise.resolve();
+function getLane(name) {
+  let state = laneState.get(name);
+  if (!state) {
+    state = { blockedUntil: 0, spacingMs: MIN_API_SPACING_MS, lastPenaltyAt: 0 };
+    laneState.set(name, state);
+  }
+  return state;
+}
+
+function paceApiCall(laneName = 'default') {
+  const state = getLane(laneName);
+  const previous = paceLanes.get(laneName) || Promise.resolve();
   let release;
   const next = new Promise((res) => { release = res; });
-  paceLanes.set(lane, next);
-  return previous.then(() => {
-    setTimeout(release, MIN_API_SPACING_MS);
+  paceLanes.set(laneName, next);
+  return previous.then(async () => {
+    // After a 429 the whole lane (every worker) waits out the provider's retry delay instead of each worker re-firing.
+    const cooldown = state.blockedUntil - Date.now();
+    if (cooldown > 0) await new Promise((r) => setTimeout(r, cooldown));
+    // Spacing relaxes back to normal a minute after the last rate limit.
+    if (state.spacingMs > MIN_API_SPACING_MS && Date.now() - state.lastPenaltyAt > 60000) {
+      state.spacingMs = MIN_API_SPACING_MS;
+    }
+    setTimeout(release, state.spacingMs);
   });
+}
+
+/** A provider said "slow down": pause this lane for its retry delay and widen the gap between calls (max 20s). */
+export function penalizeLane(laneName, retryAfterSeconds = 5) {
+  const state = getLane(laneName);
+  const now = Date.now();
+  state.blockedUntil = Math.max(state.blockedUntil, now + Math.max(1, Number(retryAfterSeconds) || 5) * 1000);
+  state.spacingMs = Math.min(Math.max(state.spacingMs * 2, 4000), 20000);
+  state.lastPenaltyAt = now;
+}
+
+export function getLaneCooldownMs(laneName) {
+  return Math.max(0, getLane(laneName).blockedUntil - Date.now());
 }
 
 export async function solve(questionText, testCases, language, options = {}) {
@@ -734,6 +767,7 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
           solverStats.rateLimits += 1;
           sawRateLimit = true;
           const retrySec = parseRetryDelaySeconds(error);
+          penalizeLane(`gemini:${i}`, retrySec);
           minRetrySeconds = Math.min(minRetrySeconds, retrySec);
 
           if (isDailyQuotaExceeded(error)) {
@@ -956,6 +990,7 @@ Example output:
       } catch (e) {
         const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(e.message || '');
         if (is429) {
+          penalizeLane(`gemini:${clientIdx}`, parseRetryDelaySeconds(e));
           solverStats.rateLimits++;
           if (isDailyQuotaExceeded(e)) { deadGeminiKeys.add(clientIdx); console.log(`    Gemini MCQ key ${clientIdx + 1} is out of daily quota; skipping it for the rest of this run.`); continue; }
           const waitMs = Math.min(2500 * (tryCount + 1), 12000);
@@ -1051,6 +1086,7 @@ Keep non-modified files UNCHANGED (do not include them in fileMap).
         console.log(`    Gemini Workspace key ${clientIdx + 1} failed: ${errMsg.slice(0, 100)}...`);
         const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(errMsg);
         if (is429) {
+          penalizeLane(`gemini:${clientIdx}`, parseRetryDelaySeconds(e));
           if (isDailyQuotaExceeded(e)) { deadGeminiKeys.add(clientIdx); continue; }
           await new Promise(r => setTimeout(r, 2000 * (tryCount + 1)));
           continue;
@@ -1147,6 +1183,7 @@ Rules:
       } catch (e) {
         const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(e.message || '');
         if (is429) {
+          penalizeLane(`gemini:${clientIdx}`, parseRetryDelaySeconds(e));
           solverStats.rateLimits++;
           if (isDailyQuotaExceeded(e)) {
             deadGeminiKeys.add(clientIdx);

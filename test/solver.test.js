@@ -105,6 +105,9 @@ test('per-MINUTE 429 pauses but never marks a provider out of quota', async () =
   assert.equal(res.failed, true);
   assert.equal(res.fatal, false);
   assert.equal(solver.allProvidersExhausted(), false);
+  // The provider's "try again in 2s" now pauses the whole lane so parallel workers don't keep hammering it.
+  const cooldown = solver.getLaneCooldownMs('groq');
+  assert.ok(cooldown > 0 && cooldown <= 2500, `expected a ~2s lane cooldown, got ${cooldown}ms`);
 });
 
 test('per-DAY 429 marks the provider dead: run is told to stop and no further calls are made', async () => {
