@@ -1,6 +1,6 @@
 // scaler_page.js — reading/classifying Scaler pages and problem text (no run orchestration).
 import { SEL } from './config.js';
-import { normalizeScalerUrl } from './scaler_url.js';
+import { normalizeScalerUrl, canonicalProblemUrl } from './scaler_url.js';
 
 export function previewCode(code, maxLines = 18) {
   const lines = (code || '').split(/\r?\n/);
@@ -175,7 +175,7 @@ export function isProblemHref(href) {
 }
 
 export async function collectAssignmentProblems(page) {
-  return page.$$eval('tr.table__row', (rows, patternSource) => {
+  const rawRows = await page.$$eval('tr.table__row', (rows, patternSource) => {
     const isProblem = (href) => {
       try {
         return new RegExp(patternSource).test(new URL(href, location.origin).pathname);
@@ -207,6 +207,8 @@ export async function collectAssignmentProblems(page) {
       })
       .filter(Boolean);
   }, PROBLEM_PATH_SOURCE);
+  // Solved if ANY signal says so: the Status word OR a full score like 50.0/50.
+  return rawRows.map((r) => ({ ...r, isSolved: r.isSolved || looksSolved(r.statusText) }));
 }
 
 export async function collectQuestionTabs(page) {
@@ -239,17 +241,74 @@ export async function collectQuestionTabs(page) {
   }, PROBLEM_PATH_SOURCE);
 }
 
-export async function getProblemSolveState(page) {
-  await page.waitForSelector('.cr-p-heading [class*="status-tag"], [class*="status-tag"]', { timeout: 4000 }).catch(() => {});
+/**
+ * Is this table-row/status text "done"? ANY signal counts, because wrongly re-solving a solved problem is far worse than skipping one:
+ * the words Solved/Completed/Accepted, or a full score such as "50.0/50". "Unsolved" always wins.
+ */
+export function looksSolved(statusText) {
+  const text = String(statusText || '');
+  if (/\bunsolved\b|\bnot\s+solved\b/i.test(text)) return false;
+  if (/\b(solved|completed|accepted)\b/i.test(text)) return true;
+  for (const m of text.matchAll(/(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/g)) {
+    const got = Number(m[1]);
+    const max = Number(m[2]);
+    if (max > 0 && got === max) return true;
+  }
+  return false;
+}
+
+/**
+ * Combine the problems table and the question dock into one list keyed by canonical URL.
+ * Only real question links are kept, and if EITHER source says a problem is solved it is solved
+ * (previously the first source won and the other one's "solved" flag was thrown away).
+ */
+export function mergeProblems(tableProblems, tabProblems) {
+  const merged = new Map();
+  for (const p of [...(tableProblems || []), ...(tabProblems || [])]) {
+    if (!p?.solveUrl || !isProblemHref(p.solveUrl)) continue;
+    const canon = canonicalProblemUrl(p.solveUrl);
+    if (!canon) continue;
+
+    const existing = merged.get(canon);
+    if (existing) {
+      if (p.isSolved) existing.isSolved = true;
+      continue;
+    }
+    merged.set(canon, { ...p, solveUrl: canon });
+  }
+  return Array.from(merged.values());
+}
+
+export async function getProblemSolveState(page, { wait = true } = {}) {
+  if (wait) {
+    await page.waitForSelector('.cr-p-heading [class*="status-tag"], [class*="status-tag"]', { timeout: 4000 }).catch(() => {});
+  }
   return page.evaluate(() => {
     // Look at every status tag, not just the first: a "Mandatory" tag usually comes before the Solved/Unsolved one.
     const tags = Array.from(document.querySelectorAll('.cr-p-heading [class*="status"], [class*="status-tag"]'));
     const texts = tags.map((t) => (t.textContent || '').trim().toLowerCase());
+    const heading = (document.querySelector('.cr-p-heading')?.innerText || '').toLowerCase();
+
     if (texts.some((t) => t.includes('unsolved'))) return 'unsolved';
-    if (texts.some((t) => /\bsolved\b/.test(t)) || tags.some((t) => /status-tag(-2)?--success/.test(String(t.className)))) return 'solved';
+    const solved =
+      texts.some((t) => /\bsolved\b/.test(t)) ||
+      tags.some((t) => /status-tag(-2)?--success/.test(String(t.className))) ||
+      /\bsolved\b/.test(heading) ||
+      document.querySelector('.cr-p-heading .cr-icon-correct') != null;
+    if (solved) return 'solved';
     if (texts.some((t) => t.includes('attempted'))) return 'attempted';
     return 'unsolved';
   }).catch(() => 'unknown');
+}
+
+/**
+ * Safety net used right before every AI call or submit: reads the solved state twice (the status badge renders late in React,
+ * and the problem may have been solved meanwhile by another worker, a previous slow verdict, or the user). Solved on EITHER read wins.
+ */
+export async function isSolvedNow(page, { wait = false, settleMs = 600 } = {}) {
+  if ((await getProblemSolveState(page, { wait })) === 'solved') return true;
+  await page.waitForTimeout(settleMs).catch(() => {});
+  return (await getProblemSolveState(page, { wait: false })) === 'solved';
 }
 
 export function buildProblemsUrl(assignmentUrl) {

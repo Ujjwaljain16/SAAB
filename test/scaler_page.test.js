@@ -7,7 +7,9 @@ import {
   normalizeLanguageName,
   classifyFailureFeedback,
   extractTestCases,
-  isLoginUrl
+  isLoginUrl,
+  looksSolved,
+  mergeProblems
 } from '../scaler_page.js';
 
 test('isProblemHref accepts only real question links (regression: help-requests / submissions were solved as questions)', () => {
@@ -56,4 +58,49 @@ test('extractTestCases pulls the sample section', () => {
 test('isLoginUrl', () => {
   assert.equal(isLoginUrl('https://www.scaler.com/users/sign_in/'), true);
   assert.equal(isLoginUrl('https://www.scaler.com/academy/x'), false);
+});
+
+test('looksSolved: any positive signal counts, "unsolved" always wins', () => {
+  assert.equal(looksSolved('Q1 Easy 50.0/50 Solved 2 submissions Solve 65'), true);
+  assert.equal(looksSolved('Q1 Easy Completed Solve'), true);
+  assert.equal(looksSolved('Q1 Accepted'), true);
+  assert.equal(looksSolved('Q1 Easy 50.0/50 Solve 65'), true, 'a full score alone means done');
+  assert.equal(looksSolved('Q1 Easy 10/10 Solve'), true);
+
+  assert.equal(looksSolved('Q1 Easy 0/50 Unsolved 0 submissions Solve 65'), false);
+  assert.equal(looksSolved('Q1 Easy 25/50 Attempted Solve'), false, 'partial credit is not solved');
+  assert.equal(looksSolved('Q1 Not solved yet 50/50'), false, '"not solved" overrides');
+  assert.equal(looksSolved('Q1 Unsolved 50/50'), false);
+  assert.equal(looksSolved(''), false);
+  assert.equal(looksSolved(undefined), false);
+});
+
+test('mergeProblems: if EITHER the table or the dock says solved, it is solved (regression: first source used to win)', () => {
+  const base = 'https://www.scaler.com/academy/mentee-dashboard/class/1/assignment/problems';
+  const table = [
+    { title: 'Q1. Alpha', solveUrl: `${base}/11?navref=cl_tt_lst_sl`, isSolved: false },
+    { title: 'Q2. Beta', solveUrl: `${base}/12?navref=cl_tt_lst_sl`, isSolved: true }
+  ];
+  const dock = [
+    { title: 'Q 1', solveUrl: `${base}/11?navref=cl_tt_nv`, isSolved: true },
+    { title: 'Q 2', solveUrl: `${base}/12?navref=cl_tt_nv`, isSolved: false },
+    { title: 'Q 3', solveUrl: `${base}/13?navref=cl_tt_nv`, isSolved: false },
+    { title: '2 submissions', solveUrl: `${base}/13/submissions?navref=x`, isSolved: false },
+    { title: 'Question help-requests', solveUrl: `${base}/13/help-requests?navref=x`, isSolved: false }
+  ];
+
+  const merged = mergeProblems(table, dock);
+  assert.equal(merged.length, 3, 'one entry per real question; submissions/help-requests dropped');
+
+  const byId = (id) => merged.find((p) => p.solveUrl.endsWith(`/${id}`));
+  assert.equal(byId(11).isSolved, true, 'dock says solved, table says unsolved -> solved');
+  assert.equal(byId(11).title, 'Q1. Alpha', 'the table title is kept');
+  assert.equal(byId(12).isSolved, true, 'table says solved, dock says unsolved -> solved');
+  assert.equal(byId(13).isSolved, false);
+  assert.ok(merged.every((p) => !p.solveUrl.includes('?')), 'URLs are canonical');
+});
+
+test('mergeProblems tolerates empty and malformed input', () => {
+  assert.deepEqual(mergeProblems(undefined, null), []);
+  assert.deepEqual(mergeProblems([{ title: 'x' }, null, { solveUrl: '' }], []), []);
 });

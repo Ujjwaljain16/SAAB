@@ -3,7 +3,7 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { launchBrowser } from './helpers/browser.js';
-import { collectAssignmentProblems, collectQuestionTabs, getProblemSolveState } from '../scaler_page.js';
+import { collectAssignmentProblems, collectQuestionTabs, getProblemSolveState, isSolvedNow } from '../scaler_page.js';
 
 const BASE = '/academy/mentee-dashboard/class/570714/assignment/problems';
 
@@ -90,4 +90,48 @@ test('getProblemSolveState reads every status tag, not just the first (Mandatory
   const bare = await pageWith('<div class="cr-p-heading">Q4</div>');
   assert.equal(await getProblemSolveState(bare), 'unsolved');
   await bare.close();
+});
+
+test('collectAssignmentProblems: a full score without the word "Solved" still counts as solved; partial credit does not', async () => {
+  const html = `<table>
+    <tr class="table__row"><td><a class="me-cr-problem-list__name" href="${BASE}/21?navref=a">Q1 full score</a></td><td>50.0/50</td><td>2 submissions</td><td><a class="me-cr-problem-actions__btn" href="${BASE}/21?navref=b">Solve</a></td></tr>
+    <tr class="table__row"><td><a class="me-cr-problem-list__name" href="${BASE}/22?navref=a">Q2 partial</a></td><td>25/50</td><td>Attempted</td><td><a class="me-cr-problem-actions__btn" href="${BASE}/22?navref=b">Solve</a></td></tr>
+    <tr class="table__row"><td><a class="me-cr-problem-list__name" href="${BASE}/23?navref=a">Q3 untouched</a></td><td>0/50</td><td>Unsolved</td><td><a class="me-cr-problem-actions__btn" href="${BASE}/23?navref=b">Solve</a></td></tr>
+  </table>`;
+  const page = await pageWith(html);
+  const problems = await collectAssignmentProblems(page);
+  await page.close();
+  assert.deepEqual(problems.map((p) => p.isSolved), [true, false, false]);
+});
+
+test('isSolvedNow catches a status badge that renders late (React) and a problem solved while we were busy', async () => {
+  // Badge appears 900ms after load: a single immediate read would wrongly say "unsolved".
+  const late = await pageWith(`<div class="cr-p-heading">Q1 <span id="slot"></span></div>
+    <script>setTimeout(() => { document.getElementById('slot').innerHTML = '<span class="status-tag-2 status-tag-2--success">Solved</span>'; }, 900);</script>`);
+  assert.equal(await isSolvedNow(late, { wait: true }), true);
+  await late.close();
+
+  // Starts unsolved, flips to solved shortly after the first read (another worker / slow judge / the user).
+  const flips = await pageWith(`<div class="cr-p-heading">Q2 <span id="slot"><span class="status-tag-2">Unsolved</span></span></div>
+    <script>setTimeout(() => { document.getElementById('slot').innerHTML = '<span class="status-tag-2 status-tag-2--success">Solved</span>'; }, 250);</script>`);
+  assert.equal(await isSolvedNow(flips, { settleMs: 700 }), true, 'the second read after the settle delay sees it');
+  await flips.close();
+
+  const unsolved = await pageWith(`<div class="cr-p-heading">Q3 <span class="status-tag-2">Unsolved</span></div>`);
+  assert.equal(await isSolvedNow(unsolved, { settleMs: 100 }), false);
+  await unsolved.close();
+});
+
+test('getProblemSolveState also recognises solved from the heading text or a correct-icon', async () => {
+  const byText = await pageWith('<div class="cr-p-heading">Q1. Purpose of Docker Solved</div>');
+  assert.equal(await getProblemSolveState(byText, { wait: false }), 'solved');
+  await byText.close();
+
+  const byIcon = await pageWith('<div class="cr-p-heading">Q2 <i class="cr-icon-correct"></i></div>');
+  assert.equal(await getProblemSolveState(byIcon, { wait: false }), 'solved');
+  await byIcon.close();
+
+  const bothWords = await pageWith('<div class="cr-p-heading">Q3 <span class="status-tag-2">Unsolved</span></div>');
+  assert.equal(await getProblemSolveState(bothWords, { wait: false }), 'unsolved', '"Unsolved" must not be mistaken for "solved"');
+  await bothWords.close();
 });
