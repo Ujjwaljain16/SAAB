@@ -20,3 +20,4 @@ curriculum-cache.json
 data/
 runs/
 debug/
+.quota/

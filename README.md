@@ -238,3 +238,18 @@ Elapsed: 142s
 ## 🤝 Contributing
 
 Problems, edge cases, new problem types — PRs welcome. The selector config lives entirely in [`config.js`](./config.js) so DOM changes are a one-line fix.
+
+---
+
+## 🚦 Rate limits and Gemini key pooling
+
+**Pooling.** Put several keys in `GEMINI_API_KEYS=key1,key2,key3`. Work goes to the least-loaded usable key (not always key 1), a key that hits its **daily** quota is retired for the day, and Groq/Grok are the fallbacks.
+Google applies limits **per project, not per API key**, so extra keys only add capacity when they belong to different projects. (The rate-limit page says nothing either way about using several projects; check Google's terms before relying on that.)
+
+**Staying under the limits.** Every request passes through a per-key limiter (`rate_limiter.js`):
+- a rolling **requests-per-minute** cap (`GEMINI_RPM`, default 10) and a minimum gap (`API_SPACING_MS`)
+- an optional **requests-per-day** budget (`GEMINI_RPD`) that is persisted in `.quota/` (key hashes only, never keys), so a second run the same day knows what the first spent. The day rolls over at midnight **Pacific** time, like Google's quota
+- if a 429 still happens, the whole lane pauses for the provider's retry delay, the allowed rate is halved and creeps back up after quiet minutes. Per-minute limits never retire a key; only a genuine per-day limit does
+- when every provider is out for the day the run stops cleanly and resumes from its checkpoint
+
+**What can't be guaranteed.** Google's free-tier numbers are per model, unpublished on the docs page, and "not guaranteed", so there is no universally safe default: read them in AI Studio and set `GEMINI_RPM` / `GEMINI_RPD`. Tokens-per-minute is not tracked (image questions cost more), and anything else using the same project (a browser tab in AI Studio, another script) spends the same quota.
