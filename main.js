@@ -3,7 +3,7 @@ import { chromium } from 'playwright';
 import { getQueue, parseProgressCount } from './crawler.js';
 import {
   solve, solverStats, looksTruncated, solveMCQ, solveWorkspace,
-  commitSolution, evictSolution, recordWrongMCQOption, assertProviderConfigured, allProvidersExhausted
+  commitSolution, evictSolution, recordWrongMCQOption, assertProviderConfigured, allProvidersExhausted, getQuotaReport
 } from './solver.js';
 import { injectAndSubmit } from './injector.js';
 import { slurpWorkspaceContext, injectWorkspaceContext, waitForWorkspaceReady } from './workspace_manager.js';
@@ -129,6 +129,10 @@ function printRunSummary(metrics, log) {
   console.log(`Cache hits: ${solverStats.cacheHits}, misses: ${solverStats.cacheMisses}`);
   console.log(`Provider rate limits: ${solverStats.rateLimits}, server errors: ${solverStats.serverErrors}`);
   console.log(`Provider failures: ${solverStats.providerFailures}`);
+  for (const q of getQuotaReport()) {
+    const rate = Number.isFinite(q.effectiveRpm) ? `${q.effectiveRpm}/min` : 'unlimited';
+    console.log(`Quota ${q.name}: ${q.used} request(s) today${q.rpd ? ` of ${q.rpd}` : ''}, rate ${rate}${q.exhausted ? ' [OUT OF QUOTA TODAY]' : ''}`);
+  }
   console.log(`Completed entries: ${totalDone}/${log.length}`);
 }
 

@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { dataPath, envNumber } from './paths.js';
+import { QuotaLimiter } from './rate_limiter.js';
 import { extractJsonBlock, hasBalancedBrackets, looksTruncated, extractLikelyCode, stripCodeComments } from './code_utils.js';
 
 export { looksTruncated };
@@ -59,18 +60,34 @@ function getApiKeys() {
 const API_KEYS = getApiKeys();
 const CLIENTS = API_KEYS.map((k) => new GoogleGenerativeAI(k));
 
-/** Next Gemini key that is not out of daily quota, or -1 when every key is exhausted. */
+const GEMINI_MODEL_NAME = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
+
+// A key is unusable for today if a 429 said so (this run) or the persisted daily budget/exhaustion flag says so (earlier runs).
+function isGeminiKeyDead(idx) {
+  return deadGeminiKeys.has(idx) || getLimiter(`gemini:${idx}`).isExhausted();
+}
+
+function markGeminiKeyDead(idx) {
+  deadGeminiKeys.add(idx);
+  getLimiter(`gemini:${idx}`).markExhausted();
+}
+
+/** Usable Gemini keys, least-loaded first, so work is spread across keys instead of always hammering key 1. */
+function geminiKeyOrder() {
+  return CLIENTS.map((_, i) => i)
+    .filter((i) => !isGeminiKeyDead(i))
+    .sort((a, b) => getLimiter(`gemini:${a}`).loadMs() - getLimiter(`gemini:${b}`).loadMs() || a - b);
+}
+
+/** Best Gemini key to use right now, or -1 when every key is exhausted. */
 function nextGeminiClientIndex() {
-  for (let n = 0; n < CLIENTS.length; n++) {
-    const idx = (nextGeminiKeyIndex++) % CLIENTS.length;
-    if (!deadGeminiKeys.has(idx)) return idx;
-  }
-  return -1;
+  const order = geminiKeyOrder();
+  return order.length > 0 ? order[0] : -1;
 }
 
 /** True when every configured provider has hit its daily quota: there is nothing left to try today. */
 export function allProvidersExhausted() {
-  const geminiOk = CLIENTS.some((_, i) => !deadGeminiKeys.has(i));
+  const geminiOk = CLIENTS.some((_, i) => !isGeminiKeyDead(i));
   const groqOk = Boolean(GROQ_API_KEY) && GROQ_MODELS.concat(GROQ_MODEL).some((m) => !deadGroqModels.has(m));
   const grokOk = Boolean(GROK_API_KEY && GROK_MODEL) && !grokDead;
   return hasAnyProvider() && !(geminiOk || groqOk || grokOk);
@@ -352,7 +369,12 @@ async function generateWithGrok(promptText) {
   if (grokDead) {
     return { ok: false, type: 'rate_limit', retryAfterSeconds: 3600, fatal: true, message: 'Grok is out of daily quota' };
   }
-  await paceApiCall('grok');
+  try {
+    await paceApiCall('grok');
+  } catch (err) {
+    grokDead = true;
+    return { ok: false, type: 'rate_limit', retryAfterSeconds: 3600, fatal: true, message: err.message };
+  }
   let res;
   try {
     res = await fetch('https://api.x.ai/v1/chat/completions', {
@@ -453,7 +475,12 @@ async function generateWithGroq(promptText, modelName = GROQ_MODEL, maxTokens = 
     }
   }
 
-  await paceApiCall('groq');
+  try {
+    await paceApiCall('groq');
+  } catch (err) {
+    deadGroqModels.add(modelName);
+    return { ok: false, type: 'rate_limit', retryAfterSeconds: 3600, fatal: true, message: err.message };
+  }
   let res;
   try {
     res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -619,47 +646,55 @@ export function recordWrongMCQOption(cacheKey, optionIndex) {
 // Independent pacing lane per provider (and per Gemini key), so N keys really give N x throughput
 // instead of every call in the process being serialized behind one global timer.
 const MIN_API_SPACING_MS = Math.max(0, envNumber('API_SPACING_MS', 2200));
-const paceLanes = new Map();
-const laneState = new Map();
+const limiters = new Map();
 
-function getLane(name) {
-  let state = laneState.get(name);
-  if (!state) {
-    state = { blockedUntil: 0, spacingMs: MIN_API_SPACING_MS, lastPenaltyAt: 0 };
-    laneState.set(name, state);
+// Per-lane budgets. These are only DEFAULTS: Google does not publish free-tier numbers on the rate-limit page ("check AI Studio"),
+// they differ per model and change over time, so set GEMINI_RPM / GEMINI_RPD to what AI Studio shows for your model.
+function laneLimits(laneName) {
+  if (laneName.startsWith('gemini:')) return { rpm: envNumber('GEMINI_RPM', 10), rpd: envNumber('GEMINI_RPD', 0) };
+  if (laneName === 'groq') return { rpm: envNumber('GROQ_RPM', 25), rpd: envNumber('GROQ_RPD', 0) };
+  if (laneName === 'grok') return { rpm: envNumber('GROK_RPM', 20), rpd: envNumber('GROK_RPD', 0) };
+  return { rpm: 0, rpd: 0 };
+}
+
+// Daily usage is persisted per lane so a second run the same day knows what the first one spent. Gemini quota belongs to a
+// (project, model) pair; we track per key+model and store only a short hash of the key, never the key itself.
+function quotaStatePath(laneName) {
+  let id = laneName.replace(/[^a-z0-9_-]/gi, '_');
+  if (laneName.startsWith('gemini:')) {
+    const key = API_KEYS[Number(laneName.split(':')[1])] || '';
+    const keyId = crypto.createHash('sha256').update(key).digest('hex').slice(0, 12);
+    id = `gemini_${keyId}_${GEMINI_MODEL_NAME.replace(/[^a-z0-9._-]/gi, '_')}`;
   }
-  return state;
+  return dataPath('.quota', `${id}.json`);
 }
 
+function getLimiter(laneName) {
+  let limiter = limiters.get(laneName);
+  if (!limiter) {
+    limiter = new QuotaLimiter({ name: laneName, ...laneLimits(laneName), minGapMs: MIN_API_SPACING_MS, statePath: quotaStatePath(laneName) });
+    limiters.set(laneName, limiter);
+  }
+  return limiter;
+}
+
+/** Wait for a slot on this lane (per-minute budget, minimum gap, cooldown). Rejects with a 429-shaped error once the daily budget is spent. */
 function paceApiCall(laneName = 'default') {
-  const state = getLane(laneName);
-  const previous = paceLanes.get(laneName) || Promise.resolve();
-  let release;
-  const next = new Promise((res) => { release = res; });
-  paceLanes.set(laneName, next);
-  return previous.then(async () => {
-    // After a 429 the whole lane (every worker) waits out the provider's retry delay instead of each worker re-firing.
-    const cooldown = state.blockedUntil - Date.now();
-    if (cooldown > 0) await new Promise((r) => setTimeout(r, cooldown));
-    // Spacing relaxes back to normal a minute after the last rate limit.
-    if (state.spacingMs > MIN_API_SPACING_MS && Date.now() - state.lastPenaltyAt > 60000) {
-      state.spacingMs = MIN_API_SPACING_MS;
-    }
-    setTimeout(release, state.spacingMs);
-  });
+  return getLimiter(laneName).acquire();
 }
 
-/** A provider said "slow down": pause this lane for its retry delay and widen the gap between calls (max 20s). */
+/** A provider said "slow down": pause this lane for its retry delay and halve its allowed rate. */
 export function penalizeLane(laneName, retryAfterSeconds = 5) {
-  const state = getLane(laneName);
-  const now = Date.now();
-  state.blockedUntil = Math.max(state.blockedUntil, now + Math.max(1, Number(retryAfterSeconds) || 5) * 1000);
-  state.spacingMs = Math.min(Math.max(state.spacingMs * 2, 4000), 20000);
-  state.lastPenaltyAt = now;
+  getLimiter(laneName).penalize(retryAfterSeconds);
 }
 
 export function getLaneCooldownMs(laneName) {
-  return Math.max(0, getLane(laneName).blockedUntil - Date.now());
+  return getLimiter(laneName).cooldownMs();
+}
+
+/** Per-lane usage (requests today, effective RPM) for the end-of-run summary. */
+export function getQuotaReport() {
+  return Array.from(limiters.values()).map((limiter) => limiter.usage());
 }
 
 export async function solve(questionText, testCases, language, options = {}) {
@@ -746,9 +781,8 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
       ? prompt
       : buildRetryPrompt(prompt, previousFailureFeedback, modelAttempt, language, selectedLanguageLabel, requiredMethodNames, starterSignatures);
 
-    for (let i = 0; i < CLIENTS.length; i++) {
-      if (deadGeminiKeys.has(i)) continue;
-      const geminiModel = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
+    for (const i of geminiKeyOrder()) {
+      const geminiModel = GEMINI_MODEL_NAME;
       const model = CLIENTS[i].getGenerativeModel({ model: geminiModel });
       let result;
 
@@ -771,7 +805,7 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
           minRetrySeconds = Math.min(minRetrySeconds, retrySec);
 
           if (isDailyQuotaExceeded(error)) {
-            deadGeminiKeys.add(i);
+            markGeminiKeyDead(i);
             continue;
           }
 
@@ -882,7 +916,7 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
     return { ok: true, code: repairedBest, cacheKey };
   }
 
-  const geminiAllExhausted = CLIENTS.length > 0 ? deadGeminiKeys.size >= CLIENTS.length : true;
+  const geminiAllExhausted = CLIENTS.length > 0 ? CLIENTS.every((_, i) => isGeminiKeyDead(i)) : true;
   const grokAllExhausted = GROK_API_KEY ? exhaustedGrok : true;
   const groqAllExhausted = GROQ_API_KEY ? GROQ_MODELS.every((m) => exhaustedGroqModels.has(m)) : true;
 
@@ -913,7 +947,6 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
   };
 }
 
-let nextGeminiKeyIndex = 0;
 
 export async function solveMCQ(problemContent) {
   const cacheKey = makeMCQCacheKey(problemContent);
@@ -966,7 +999,7 @@ Example output:
   if (screenshot64) console.log('    [MCQ] Image-based question — using Gemini Vision multimodal input.');
 
   if (CLIENTS.length > 0) {
-    const geminiModel = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
+    const geminiModel = GEMINI_MODEL_NAME;
     const maxTries = Math.max(6, CLIENTS.length * 3);
 
     for (let tryCount = 0; tryCount < maxTries; tryCount++) {
@@ -992,10 +1025,9 @@ Example output:
         if (is429) {
           penalizeLane(`gemini:${clientIdx}`, parseRetryDelaySeconds(e));
           solverStats.rateLimits++;
-          if (isDailyQuotaExceeded(e)) { deadGeminiKeys.add(clientIdx); console.log(`    Gemini MCQ key ${clientIdx + 1} is out of daily quota; skipping it for the rest of this run.`); continue; }
-          const waitMs = Math.min(2500 * (tryCount + 1), 12000);
-          console.log(`    Gemini MCQ key ${clientIdx + 1} rate-limited. Waiting ${waitMs / 1000}s...`);
-          await new Promise(r => setTimeout(r, waitMs));
+          if (isDailyQuotaExceeded(e)) { markGeminiKeyDead(clientIdx); console.log(`    Gemini MCQ key ${clientIdx + 1} is out of daily quota; skipping it for the rest of this run.`); continue; }
+          // No local sleep: penalizeLane() above already made this key's lane wait out the provider's retry delay.
+          console.log(`    Gemini MCQ key ${clientIdx + 1} rate-limited; its lane is paused for ${Math.ceil(getLaneCooldownMs(`gemini:${clientIdx}`) / 1000)}s.`);
           continue;
         }
         if (isRetryableServerError(e)) {
@@ -1069,7 +1101,7 @@ Keep non-modified files UNCHANGED (do not include them in fileMap).
 `;
 
   if (CLIENTS.length > 0) {
-    const modelName = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
+    const modelName = GEMINI_MODEL_NAME;
     for (let tryCount = 0; tryCount < Math.max(2, CLIENTS.length); tryCount++) {
       const clientIdx = nextGeminiClientIndex();
       if (clientIdx < 0) break;
@@ -1087,7 +1119,7 @@ Keep non-modified files UNCHANGED (do not include them in fileMap).
         const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(errMsg);
         if (is429) {
           penalizeLane(`gemini:${clientIdx}`, parseRetryDelaySeconds(e));
-          if (isDailyQuotaExceeded(e)) { deadGeminiKeys.add(clientIdx); continue; }
+          if (isDailyQuotaExceeded(e)) { markGeminiKeyDead(clientIdx); continue; }
           await new Promise(r => setTimeout(r, 2000 * (tryCount + 1)));
           continue;
         }
@@ -1156,7 +1188,7 @@ Rules:
 5. Return ONLY the JSON object. Do not include markdown or explanations outside the JSON.`;
 
   if (CLIENTS.length > 0) {
-    const geminiModel = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
+    const geminiModel = GEMINI_MODEL_NAME;
     const maxTries = Math.max(4, CLIENTS.length * 2);
 
     for (let tryCount = 0; tryCount < maxTries; tryCount++) {
@@ -1186,13 +1218,11 @@ Rules:
           penalizeLane(`gemini:${clientIdx}`, parseRetryDelaySeconds(e));
           solverStats.rateLimits++;
           if (isDailyQuotaExceeded(e)) {
-            deadGeminiKeys.add(clientIdx);
+            markGeminiKeyDead(clientIdx);
             console.log(`    Gemini key ${clientIdx + 1} is out of daily quota; skipping it for the rest of this run.`);
             continue;
           }
-          const waitMs = Math.min(2500 * (tryCount + 1), 10000);
-          console.log(`    Gemini key ${clientIdx + 1} rate-limited (429). Waiting ${waitMs / 1000}s...`);
-          await new Promise(r => setTimeout(r, waitMs));
+          console.log(`    Gemini key ${clientIdx + 1} rate-limited (429); its lane is paused for ${Math.ceil(getLaneCooldownMs(`gemini:${clientIdx}`) / 1000)}s.`);
           continue;
         }
         if (isRetryableServerError(e)) {
