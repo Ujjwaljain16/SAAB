@@ -59,7 +59,7 @@ function extractFocusedFeedback(bodyText) {
     }
   }
 
-  const testOutputMatch = text.match(/Test\s+Output\s*[:\-]?[\s\S]*$/i);
+  const testOutputMatch = text.match(/Test\s+Output\s*[:-]?[\s\S]*$/i);
   return sanitizeFeedback(testOutputMatch ? testOutputMatch[0] : text);
 }
 
@@ -71,7 +71,7 @@ async function waitForVerdict(page, timeoutMs = 55000) {
       const bodyText = (document.body.innerText || '').replace(/\s+/g, ' ').trim();
       const lower = bodyText.toLowerCase();
 
-      const finalVerdictMatch = bodyText.match(/Final\s+Verdict\s*[:\-]?\s*([^\n]+)/i);
+      const finalVerdictMatch = bodyText.match(/Final\s+Verdict\s*[:-]?\s*([^\n]+)/i);
       const finalVerdict = finalVerdictMatch ? (finalVerdictMatch[1] || '').trim() : '';
 
       const failureSignals = [
@@ -128,14 +128,17 @@ async function waitForVerdict(page, timeoutMs = 55000) {
   };
 }
 
-export async function injectAndSubmit(page, code) {
+export async function injectAndSubmit(page, code, { verdictTimeoutMs = 55000 } = {}) {
   if (!code) {
     console.log("No code provided to inject.");
     return { status: 'fail', verdict: 'No code generated', feedback: 'Solver returned empty code.' };
   }
 
   // Fast wait for editor DOM + Monaco JS API
-  await page.waitForSelector(SEL.editorContainer, { timeout: 8000 });
+  const editor = await page.waitForSelector(SEL.editorContainer, { timeout: 8000 }).catch(() => null);
+  if (!editor) {
+    return { status: 'fail', verdict: 'Editor not found', feedback: 'Code editor did not load - wrong page or session expired.' };
+  }
   await page.waitForFunction(
     () => window.monaco?.editor?.getModels?.()?.length > 0,
     { timeout: 8000 }
@@ -180,7 +183,7 @@ export async function injectAndSubmit(page, code) {
   }
   await submitLocator.click();
 
-  const verdict = await waitForVerdict(page);
+  const verdict = await waitForVerdict(page, verdictTimeoutMs);
   if (verdict.status === 'timeout') {
     console.log("Timed out waiting for submit result.");
   }
