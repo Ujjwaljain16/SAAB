@@ -1,34 +1,59 @@
 import 'dotenv/config';
 import { chromium } from 'playwright';
 import { getQueue, parseProgressCount } from './crawler.js';
-import { solve, solverStats, looksTruncated, solveMCQ, solveWorkspace } from './solver.js';
+import {
+  solve, solverStats, looksTruncated, solveMCQ, solveWorkspace,
+  commitSolution, evictSolution, recordWrongMCQOption, assertProviderConfigured
+} from './solver.js';
 import { injectAndSubmit } from './injector.js';
 import { slurpWorkspaceContext, injectWorkspaceContext, waitForWorkspaceReady } from './workspace_manager.js';
 import { slurpMCQContext, injectMCQAnswer } from './mcq_handler.js';
 import { solveAndSubmitLab } from './lab_handler.js';
 import { SEL } from './config.js';
+import { snapshotPage } from './page_utils.js';
+import { dataPath } from './paths.js';
+import { makeRunState, markClassComplete, markProblemComplete } from './run_state.js';
+import {
+  previewCode, classifyFailureFeedback, resolveTargetLanguage, selectProblemLanguage,
+  getCurrentSelectedLanguageLabel, extractProblemContent, extractTestCases, extractEditorStarterCode,
+  collectAssignmentProblems, collectQuestionTabs, getProblemSolveState, buildProblemsUrl, isLoginUrl, detectProblemType
+} from './scaler_page.js';
+import { pathToFileURL } from 'url';
 import { normalizeScalerUrl, canonicalProblemUrl } from './scaler_url.js';
 import { loginToScaler } from './scaler_login.js';
 import fs from 'fs';
 import path from 'path';
-import { runBits } from './bits_main.js';
 
 let globalHaltRun = false;
 let globalHaltReason = '';
 
-process.on('SIGINT', () => {
-  console.log('\n[SIGINT] Received interrupt signal. Halting gracefully after current operations to save state...');
+let signalCount = 0;
+function handleStopSignal(name, reason) {
+  signalCount += 1;
+  if (signalCount > 1) {
+    console.log(`\n[${name}] Second signal received. Forcing exit.`);
+    process.exit(130);
+  }
+  console.log(`\n[${name}] Halting gracefully after current operations to save state... (send again to force quit)`);
   globalHaltRun = true;
-  globalHaltReason = 'Manually interrupted (SIGINT)';
-});
+  globalHaltReason = reason;
+}
 
-process.on('SIGTERM', () => {
-  console.log('\n[SIGTERM] Received termination signal. Halting gracefully after current operations to save state...');
-  globalHaltRun = true;
-  globalHaltReason = 'Terminated (SIGTERM)';
-});
+process.on('SIGINT', () => handleStopSignal('SIGINT', 'Manually interrupted (SIGINT)'));
+process.on('SIGTERM', () => handleStopSignal('SIGTERM', 'Terminated (SIGTERM)'));
 
 const DELAY = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Refuse unknown CLI arguments: a typo like `npm run start :mcq` used to be ignored and silently ran EVERYTHING in live-submit mode.
+const KNOWN_FLAGS = ['--dry-run', '--submit', '--skip-labs', '--only-mcq', '--only-labs', '--bits', '--recheck', '--force', '--refresh-curriculum', '--live'];
+const KNOWN_PREFIXES = ['--class=', '--subject=', '--max-submissions=', '--course=', '--assignment='];
+const unknownArgs = process.argv.slice(2).filter((a) => !KNOWN_FLAGS.includes(a) && !KNOWN_PREFIXES.some((p) => a.startsWith(p)));
+if (unknownArgs.length > 0) {
+  console.error(`Unknown argument(s): ${unknownArgs.join(' ')}`);
+  console.error(`Known flags: ${KNOWN_FLAGS.join(' ')} ${KNOWN_PREFIXES.map((p) => `${p}<value>`).join(' ')}`);
+  console.error('For MCQ-only use: npm run start:mcq   (no space before the colon)');
+  process.exit(2);
+}
 const DRY_RUN = process.argv.includes('--dry-run') && !process.argv.includes('--submit');
 const CLASS_FILTER = process.argv.find(a => a.startsWith('--class='))?.split('=')[1] || '';
 const SUBJECT_FILTER = process.argv.find(a => a.startsWith('--subject='))?.split('=')[1] || '';
@@ -36,9 +61,10 @@ const SKIP_LABS = process.argv.includes('--skip-labs') || process.env.SKIP_LABS 
 const ONLY_MCQ = process.argv.includes('--only-mcq') || process.env.ONLY_MCQ === 'true';
 const ONLY_LABS = process.argv.includes('--only-labs') || process.env.ONLY_LABS === 'true';
 const IS_BITS = process.argv.includes('--bits') || process.env.BITS === 'true';
-const FORCE_RECHECK = process.argv.includes('--recheck') || process.argv.includes('--force');
-const RUN_STATE_PATH = path.join(process.cwd(), 'run-state.json');
-const SOLVE_CONCURRENCY = Math.max(1, Number(process.env.SOLVE_CONCURRENCY || 4));
+const RUN_STATE_PATH = dataPath('run-state.json');
+const SOLVE_CONCURRENCY = Math.max(1, Number(process.env.SOLVE_CONCURRENCY) || 4);
+// Safety valve: stop after this many submissions in one run (0 = unlimited). Workers may overshoot by SOLVE_CONCURRENCY - 1.
+const MAX_SUBMISSIONS = Math.max(0, Number(process.argv.find(a => a.startsWith('--max-submissions='))?.split('=')[1] ?? process.env.MAX_SUBMISSIONS) || 0);
 
 class AsyncMutex {
   constructor() {
@@ -106,307 +132,6 @@ function printRunSummary(metrics, log) {
   console.log(`Completed entries: ${totalDone}/${log.length}`);
 }
 
-function loadRunState() {
-  try {
-    if (!fs.existsSync(RUN_STATE_PATH)) {
-      return { version: 1, completedClasses: [], completedProblems: [] };
-    }
-
-    const raw = fs.readFileSync(RUN_STATE_PATH, 'utf-8');
-    const parsed = JSON.parse(raw);
-    return {
-      version: 1,
-      completedClasses: Array.isArray(parsed.completedClasses) ? parsed.completedClasses : [],
-      completedProblems: Array.isArray(parsed.completedProblems) ? parsed.completedProblems : []
-    };
-  } catch {
-    return { version: 1, completedClasses: [], completedProblems: [] };
-  }
-}
-
-function saveRunState(state) {
-  try {
-    const payload = {
-      version: 1,
-      updatedAt: new Date().toISOString(),
-      completedClasses: state.completedClasses,
-      completedProblems: state.completedProblems
-    };
-    const tmp = RUN_STATE_PATH + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2));
-    fs.renameSync(tmp, RUN_STATE_PATH);
-  } catch {}
-}
-
-function makeRunState() {
-  const stored = loadRunState();
-  const completedProblems = new Set();
-  for (const p of stored.completedProblems) {
-    const c = canonicalProblemUrl(p);
-    if (c) completedProblems.add(c);
-  }
-  return {
-    completedClasses: new Set(stored.completedClasses),
-    completedProblems
-  };
-}
-
-function persistRunState(runState) {
-  saveRunState({
-    completedClasses: Array.from(runState.completedClasses),
-    completedProblems: Array.from(runState.completedProblems)
-  });
-}
-
-function markClassComplete(runState, classUrl) {
-  runState.completedClasses.add(classUrl);
-  persistRunState(runState);
-}
-
-function markProblemComplete(runState, problemKey) {
-  const canon = canonicalProblemUrl(problemKey);
-  if (canon) {
-    runState.completedProblems.add(canon);
-    persistRunState(runState);
-  }
-}
-
-function previewCode(code, maxLines = 18) {
-  const lines = (code || '').split(/\r?\n/);
-  if (lines.length <= maxLines) {
-    return code;
-  }
-  return `${lines.slice(0, maxLines).join('\n')}\n... [truncated ${lines.length - maxLines} lines]`;
-}
-
-function classifyFailureFeedback(text) {
-  const value = (text || '').toLowerCase();
-
-  if (value.includes('incompatible types') || value.includes('cannot find symbol') || value.includes('method ') || value.includes('signature')) {
-    return 'Compilation/signature mismatch. Preserve the starter method names, parameter types, and return types exactly.';
-  }
-  if (value.includes('wrong answer') || value.includes('expected') || value.includes('actual')) {
-    return 'Wrong answer. Keep the same scaffold and fix only the logic difference shown in feedback.';
-  }
-  if (value.includes('runtime error') || value.includes('exception') || value.includes('nullpointer') || value.includes('indexoutofbounds')) {
-    return 'Runtime error. Add safety checks and handle edge cases without changing required signatures.';
-  }
-  if (value.includes('time limit exceeded') || value.includes('tle')) {
-    return 'Time limit issue. Optimize the current approach without changing the required API.';
-  }
-
-  return 'Use the feedback to improve the current attempt while preserving the starter scaffold and required method names.';
-}
-
-function normalizeProblemTitle(title) {
-  return title.replace(/\s*-\s*Problem.*$/i, '').trim();
-}
-
-function resolveTargetLanguage(subject) {
-  if (/programming using js/i.test(subject)) {
-    return 'JavaScript';
-  }
-  return 'Java';
-}
-
-function normalizeLanguageName(value) {
-  const v = (value || '').toLowerCase();
-  if (v.includes('javascript')) return 'javascript';
-  if (/(^|\b)java(\b|$)/.test(v)) return 'java';
-  return '';
-}
-
-async function getCurrentSelectedLanguage(page) {
-  return page.evaluate((inputSelector) => {
-    const input = document.querySelector(inputSelector);
-    if (!input) return '';
-
-    const selectRoot = input.closest('[class*="select"]') || input.parentElement;
-    const text = (selectRoot?.innerText || '').replace(/\s+/g, ' ').trim();
-    const lower = text.toLowerCase();
-
-    if (lower.includes('javascript')) return 'javascript';
-    if (/(^|\b)java(\b|$)/.test(lower)) return 'java';
-    return '';
-  }, SEL.problemLanguageInput).catch(() => '');
-}
-
-async function getCurrentSelectedLanguageLabel(page) {
-  return page.evaluate((inputSelector) => {
-    const input = document.querySelector(inputSelector);
-    if (!input) return '';
-    const selectRoot = input.closest('[class*="select"]') || input.parentElement;
-    return (selectRoot?.innerText || '').replace(/\s+/g, ' ').trim();
-  }, SEL.problemLanguageInput).catch(() => '');
-}
-
-async function selectProblemLanguage(page, targetLanguage) {
-  const languageInput = page.locator(SEL.problemLanguageInput).first();
-  if ((await languageInput.count()) === 0) {
-    return false;
-  }
-
-  const target = normalizeLanguageName(targetLanguage);
-  if (!target) return false;
-
-  const current = await getCurrentSelectedLanguage(page);
-  if (current === target) {
-    return true;
-  }
-
-  const desired = /java/i.test(targetLanguage) ? 'Java Array' : targetLanguage;
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    await languageInput.click({ force: true }).catch(() => {});
-    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
-    await page.keyboard.type(desired, { delay: 15 }).catch(() => {});
-    await page.keyboard.press('Enter').catch(() => {});
-    if (/java/i.test(targetLanguage)) {
-      await page.keyboard.press('Enter').catch(() => {});
-    }
-    await page.waitForTimeout(300);
-    const updated = await getCurrentSelectedLanguage(page);
-    if (updated === target) {
-      return true;
-    }
-  }
-
-  return (await getCurrentSelectedLanguage(page)) === target;
-}
-
-async function extractProblemContent(page) {
-  const title = normalizeProblemTitle(await page.title());
-  const rawBody = await page.locator('body').innerText().catch(() => '');
-
-  let body = rawBody || '';
-  const start = body.search(/problem\s+description/i);
-  if (start !== -1) {
-    body = body.slice(start);
-  }
-
-  const endMarkers = [
-    /expected\s+output/i,
-    /test\s+output/i,
-    /enter\s+input\s+here/i,
-    /all\s+subjects\s+and\s+classes/i,
-    /refer\s+friends/i
-  ];
-
-  let cutAt = body.length;
-  for (const marker of endMarkers) {
-    const match = marker.exec(body);
-    if (match && typeof match.index === 'number') {
-      cutAt = Math.min(cutAt, match.index);
-    }
-  }
-
-  body = body.slice(0, cutAt).trim();
-  body = body.replace(/\n{3,}/g, '\n\n').slice(0, 12000);
-
-  return { title, body };
-}
-
-function extractTestCases(body) {
-  if (!body) return '';
-  const match = body.match(/(?:sample|example)\s*(?:input|test\s*case)s?[\s\S]*$/i);
-  return match ? match[0].slice(0, 4000) : '';
-}
-
-async function extractEditorStarterCode(page) {
-  const monacoValue = await page.evaluate(() => {
-    if (window.monaco?.editor?.getModels) {
-      const models = window.monaco.editor.getModels();
-      if (models && models.length > 0) {
-        return models[0].getValue() || '';
-      }
-    }
-    return '';
-  }).catch(() => '');
-
-  if (monacoValue && monacoValue.trim()) {
-    return monacoValue;
-  }
-
-  const textareaValue = await page.locator(SEL.editorInput).first().inputValue().catch(() => '');
-  return textareaValue || '';
-}
-
-async function collectAssignmentProblems(page) {
-  return page.$$eval('tr.table__row', (rows) =>
-    rows
-      .map((row) => {
-        const nameLink = row.querySelector('a[href*="/assignment/problems/"]');
-        const solveLink = row.querySelector('a.me-cr-classroom-url.me-cr-problem-actions__btn[href*="/assignment/problems/"]');
-        const targetLink = solveLink || nameLink;
-
-        if (!targetLink) {
-          return null;
-        }
-
-        const title = (nameLink?.textContent || row.querySelector('td')?.textContent || '').trim();
-        const statusText = (row.innerText || '').trim().replace(/\s+/g, ' ');
-        const isSolved = /solved|100\s*\/\s*100/i.test(statusText) && !/unsolved/i.test(statusText);
-
-        return {
-          title: title || 'Problem',
-          solveUrl: targetLink.getAttribute('href') || '',
-          statusText,
-          isSolved,
-        };
-      })
-      .filter(Boolean)
-  );
-}
-
-async function collectQuestionTabs(page) {
-  return page.$$eval('a.cr-p-navigation-dock-item[href*="/assignment/problems/"], a[href*="/assignment/problems/"]', (tabs) =>
-    tabs
-      .map((tab) => {
-        const href = tab.getAttribute('href') || '';
-        if (!href.includes('/assignment/problems/')) {
-          return null;
-        }
-        const text = (tab.textContent || '').trim().replace(/\s+/g, ' ');
-        const isSolved = tab.classList.contains('cr-p-navigation-dock-item--success') ||
-                         tab.classList.contains('me-cr-p-nav-dock-item--success') ||
-                         tab.querySelector('svg[class*="success"], i[class*="check"], [class*="status-tag--success"]') != null;
-
-        return {
-          title: text || `Question ${href.split('/').pop()}`,
-          solveUrl: href,
-          isSolved,
-        };
-      })
-      .filter(Boolean)
-  );
-}
-
-async function getProblemSolveState(page) {
-  await page.waitForSelector('.cr-p-heading .status-tag-2, .cr-p-heading [class*="status"], [class*="status-tag"]', { timeout: 2500 }).catch(() => {});
-  return page.evaluate(() => {
-    const headingEl = document.querySelector('.cr-p-heading .status-tag-2, .cr-p-heading [class*="status"], [class*="status-tag"]');
-    if (headingEl) {
-      const text = (headingEl.textContent || '').trim().toLowerCase();
-      if (text.includes('solved') && !text.includes('unsolved')) return 'solved';
-      if (text.includes('unsolved')) return 'unsolved';
-      if (text.includes('attempted')) return 'attempted';
-    }
-    const hasSolvedBadge = document.querySelector('.cr-p-heading .status-tag-2--success, .status-tag--success, [class*="status-tag--success"]') != null;
-    if (hasSolvedBadge) return 'solved';
-    return 'unsolved';
-  }).catch(() => 'unknown');
-}
-
-function buildProblemsUrl(assignmentUrl) {
-  const norm = normalizeScalerUrl(assignmentUrl);
-  const url = new URL(norm);
-  url.pathname = url.pathname.replace(/\/assignment\/?$/i, '/assignment/problems');
-  if (!url.searchParams.has('navref')) {
-    url.searchParams.set('navref', 'cl_tt_nv');
-  }
-  return url.toString();
-}
-
 async function safeGoto(page, url, options = {}) {
   const maxRetries = 3;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -433,60 +158,30 @@ async function safeGoto(page, url, options = {}) {
   }
 }
 
-function isLoginUrl(url) {
-  return /\/(login|sign_in)\b/i.test(url || '');
-}
-
 async function ensureLoggedIn(page, ctx, reason = 'session check') {
   if (!isLoginUrl(page.url())) {
     return;
   }
   console.log(`Session expired (${reason}). Re-authenticating...`);
   await loginToScaler(page);
-  await ctx.storageState({ path: 'session.json' }).catch(() => {});
-}
-
-async function detectProblemType(page) {
-  // Wait briefly for React problem controls to mount
-  await page.waitForFunction(() => {
-    const isMcq = document.querySelectorAll('.cr-multiple-choice, input[type="radio"], input[type="checkbox"]').length > 0;
-    const hasMonaco = document.querySelector('.monaco-editor') != null;
-    const btns = Array.from(document.querySelectorAll('button, a'));
-    const hasLauncher = btns.some(b => (b.innerText || '').match(/open ide|launch lab|launch|vs\s*code/i));
-    return isMcq || hasMonaco || hasLauncher;
-  }, { timeout: 5000 }).catch(() => {});
-
-  const isMcq = (await page.locator('.cr-multiple-choice, input[type="radio"], input[type="checkbox"]').count()) > 0;
-  if (isMcq) return 'mcq';
-
-  // Check for VS Code IDE (open IDE button without Maxwell/terminal markers)
-  const isVSCode = await page.evaluate(() => {
-    if (document.querySelector('#vscode-ide, .EditorLayout-module_container__Uxq1a, .code-editor-layer')) return true;
-    const btns = Array.from(document.querySelectorAll('button, a, span, div'));
-    return btns.some(b => (b.innerText || '').trim().match(/^open\s*ide$|vs\s*code/i));
-  }).catch(() => false);
-  if (isVSCode) return 'vscode';
-
-  // Check for Maxwell terminal labs (Launch Lab button or maxwell iframe)
-  const isLab = await page.evaluate(() => {
-    if (document.querySelector('iframe[src*="maxwell"], iframe[allow*="clipboard-read"]')) return true;
-    if (document.querySelector('.LaunchButton-module_btn__o1LoJ')) return true;
-    const btns = Array.from(document.querySelectorAll('button, a, span, div'));
-    return btns.some(b => (b.innerText || '').trim().match(/^launch\s*(lab)?$/i));
-  }).catch(() => false);
-  if (isLab) return 'lab';
-
-  return 'coding';
+  await ctx.storageState({ path: dataPath('session.json') }).catch(() => {});
 }
 
 async function run() {
   if (IS_BITS) {
+    const { runBits } = await import('./bits_main.js');
     return runBits();
   }
 
-  const runState = makeRunState();
+  assertProviderConfigured();
+
+  const runState = makeRunState(RUN_STATE_PATH);
   const metrics = createRunMetrics();
-  const userDataDir = path.join(process.cwd(), 'temp_chrome_profile');
+  const userDataDir = process.env.SAAB_PROFILE_DIR
+    ? path.resolve(process.env.SAAB_PROFILE_DIR)
+    : path.join(process.cwd(), 'temp_chrome_profile');
+  // SAAB_HEADLESS / SAAB_BROWSER_CHANNEL exist so the test-suite can drive this file against a mock site.
+  const browserChannel = process.env.SAAB_BROWSER_CHANNEL === undefined ? 'chrome' : process.env.SAAB_BROWSER_CHANNEL;
   const profileName = 'Profile 3';
 
   if (!fs.existsSync(userDataDir)) {
@@ -497,8 +192,8 @@ async function run() {
   console.log(`Launching Chrome with high-speed Page Pool (${SOLVE_CONCURRENCY} workers)... Mode: ${DRY_RUN ? 'dry-run' : 'submit'}${ONLY_MCQ ? ' [ONLY-MCQ]' : ''}${SKIP_LABS ? ' [SKIP-LABS]' : ''}`);
 
   const ctx = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
-    channel: 'chrome',
+    headless: process.env.SAAB_HEADLESS === 'true',
+    ...(browserChannel ? { channel: browserChannel } : {}),
     permissions: ['clipboard-read', 'clipboard-write'],
     args: [
       `--profile-directory=${profileName}`,
@@ -524,6 +219,12 @@ async function run() {
     }
     return route.continue();
   });
+
+  // Test-only hook: a module exporting `setup(ctx)` that registers mock routes on the browser context.
+  if (process.env.SAAB_TEST_ROUTES) {
+    const hook = await import(pathToFileURL(path.resolve(process.env.SAAB_TEST_ROUTES)).href);
+    await hook.setup(ctx);
+  }
 
   const log = [];
 
@@ -609,6 +310,7 @@ async function run() {
 
         if (problems.length === 0) {
           console.log('No assignment problems found on this page.');
+          await snapshotPage(mainPage, 'no-problems-found', classUrl);
           continue;
         }
 
@@ -643,11 +345,18 @@ async function run() {
 
       async function runWorker(page, workerId) {
         while (!globalHaltRun) {
+          if (MAX_SUBMISSIONS && metrics.submitAttempts >= MAX_SUBMISSIONS) {
+            globalHaltRun = true;
+            globalHaltReason = `Reached submission cap (${MAX_SUBMISSIONS})`;
+            break;
+          }
           let problem;
           if (problemQueueIndex >= pendingProblems.length) {
             break;
           }
           problem = pendingProblems[problemQueueIndex++];
+
+          try {
 
           const solveUrl = problem.solveUrl.startsWith('http') ? problem.solveUrl : `https://www.scaler.com${problem.solveUrl}`;
           if (runState.completedProblems.has(solveUrl)) {
@@ -674,6 +383,9 @@ async function run() {
           const targetLanguage = resolveTargetLanguage(subject);
           const type = await detectProblemType(page);
           console.log(`  [Worker ${workerId}] Detected problem type: ${type} for ${problem.title}`);
+          if (type === 'coding' && (await page.locator(SEL.problemEditor).count()) === 0) {
+            await snapshotPage(page, 'unrecognized-problem-type', problem.title);
+          }
 
           if (ONLY_MCQ && type !== 'mcq') {
             console.log(`  [Worker ${workerId}] ⏭️ Skipping non-MCQ problem (--only-mcq active): ${problem.title}`);
@@ -682,7 +394,7 @@ async function run() {
             continue;
           }
 
-          if (ONLY_LABS && type !== 'lab' && type !== 'launcher' && type !== 'vscode') {
+          if (ONLY_LABS && type !== 'lab' && type !== 'vscode') {
             console.log(`  [Worker ${workerId}] ⏭️ Skipping non-lab problem (--only-labs active): ${problem.title}`);
             log.push({ title: problem.title, result: 'skipped' });
             classAllPassed = false;
@@ -691,10 +403,11 @@ async function run() {
 
           let problemContent = await extractProblemContent(page);
 
-          if (type === 'lab' || type === 'launcher') {
+          if (type === 'lab') {
             if (SKIP_LABS || ONLY_MCQ) {
               console.log(`  [Worker ${workerId}] ⏭️ Skipping terminal lab (${SKIP_LABS ? '--skip-labs' : '--only-mcq'} active): ${problem.title}`);
               log.push({ title: problem.title, result: 'skipped' });
+              classAllPassed = false;
               continue;
             }
 
@@ -727,6 +440,7 @@ async function run() {
                 metrics.problemsFailed += 1;
                 classAllPassed = false;
                 console.log(`  [Worker ${workerId}] ✗ Lab ${labResult.verdict}: ${problem.title}`);
+                await snapshotPage(page, 'lab-fail', `${problem.title} :: ${labResult.verdict}`);
               }
             } finally {
               release();
@@ -788,7 +502,7 @@ async function run() {
               const submitBtn = page.locator(SEL.submitBtn).first();
               if (await submitBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
                 await submitBtn.click().catch(() => {});
-                const verdict = await page.waitForFunction(() => {
+                await page.waitForFunction(() => {
                   const t = (document.body.innerText || '').toLowerCase();
                   return t.includes('correct answer') || t.includes('all test cases passed') || t.includes('wrong answer') || t.includes('failed');
                 }, { timeout: 40000 }).then(() => true).catch(() => false);
@@ -823,11 +537,20 @@ async function run() {
             if (ONLY_LABS) {
               console.log(`  [Worker ${workerId}] ⏭️ Skipping MCQ (--only-labs active): ${problem.title}`);
               log.push({ title: problem.title, result: 'skipped' });
+              classAllPassed = false;
               continue;
             }
             problemContent = await slurpMCQContext(page);
             console.log(`  [Worker ${workerId}] Solving MCQ: ${problem.title}`);
             const mcqResult = await solveMCQ(problemContent);
+
+            if (mcqResult.failed) {
+              metrics.problemsFailed += 1;
+              classAllPassed = false;
+              log.push({ title: problem.title, result: 'fail' });
+              console.log(`  [Worker ${workerId}] ✗ MCQ not answered (no valid AI answer, nothing submitted): ${problem.title}`);
+              continue;
+            }
 
             if (DRY_RUN) {
               metrics.problemsDryRun += 1;
@@ -837,17 +560,23 @@ async function run() {
             }
 
             metrics.submitAttempts += 1;
-            const mcqInjectResult = await injectMCQAnswer(page, mcqResult.bestOptionIndex || 0);
+            const mcqInjectResult = await injectMCQAnswer(page, mcqResult.bestOptionIndex);
             log.push({ title: problem.title, result: mcqInjectResult.status });
 
             if (mcqInjectResult.status === 'pass') {
               metrics.problemsSolved += 1;
               console.log(`  [Worker ${workerId}] ✓ MCQ Passed: ${problem.title}`);
+              commitSolution(mcqResult.cacheKey, { bestOptionIndex: mcqResult.bestOptionIndex, reasoning: mcqResult.reasoning });
               markProblemComplete(runState, solveUrl);
             } else {
               metrics.problemsFailed += 1;
               classAllPassed = false;
+              evictSolution(mcqResult.cacheKey);
+              if (mcqInjectResult.verdict === 'Incorrect') {
+                recordWrongMCQOption(mcqResult.cacheKey, mcqResult.bestOptionIndex);
+              }
               console.log(`  [Worker ${workerId}] ✗ MCQ ${mcqInjectResult.verdict}: ${problem.title}`);
+              await snapshotPage(page, 'mcq-fail', `${problem.title} :: ${mcqInjectResult.verdict}`);
             }
             continue;
           }
@@ -916,9 +645,11 @@ async function run() {
             if (result === 'pass') {
               metrics.problemsSolved += 1;
               console.log(`  [Worker ${workerId}] ✓ Passed! Verdict: ${submitResult.verdict}`);
+              commitSolution(solveResult.cacheKey, { code, language: targetLanguage });
               break;
             }
 
+            evictSolution(solveResult.cacheKey);
             failureFeedback = submitResult.feedback || submitResult.verdict || 'Submission failed.';
             console.log(`  [Worker ${workerId}] Attempt ${attempt} failed: ${failureFeedback.slice(0, 160)}...`);
             await DELAY(500);
@@ -927,6 +658,7 @@ async function run() {
           if (!['pass', 'dry-run'].includes(result)) {
             metrics.problemsFailed += 1;
             classAllPassed = false;
+            await snapshotPage(page, 'coding-fail', `${problem.title} :: ${failureFeedback.slice(0, 300)}`);
           }
 
           log.push({ title: problem.title, result });
@@ -935,6 +667,13 @@ async function run() {
 
           if (result === 'pass') {
             markProblemComplete(runState, solveUrl);
+          }
+          } catch (err) {
+            metrics.problemsFailed += 1;
+            classAllPassed = false;
+            log.push({ title: problem?.title || 'unknown', result: 'fail' });
+            console.error(`  [Worker ${workerId}] ✗ Unexpected error on "${problem?.title}": ${err.message}`);
+            await snapshotPage(page, 'worker-error', `${problem?.title} :: ${err.message}`);
           }
         }
       }
@@ -966,7 +705,11 @@ async function run() {
     }
   } finally {
     try {
-      fs.writeFileSync('run-log.json', JSON.stringify(log, null, 2));
+      const logJson = JSON.stringify(log, null, 2);
+      fs.writeFileSync(dataPath('run-log.json'), logJson);
+      // Keep a per-run history so earlier runs aren't lost when the next one overwrites run-log.json.
+      fs.mkdirSync(dataPath('runs'), { recursive: true });
+      fs.writeFileSync(dataPath('runs', `run-${new Date(metrics.startedAt).toISOString().replace(/[:.]/g, '-')}.json`), logJson);
     } catch {}
 
     if (globalHaltRun) {
@@ -979,4 +722,7 @@ async function run() {
   }
 }
 
-run().catch(console.error);
+run().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
