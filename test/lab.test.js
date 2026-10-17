@@ -234,7 +234,7 @@ test('an unexpected failure wording is still recognised as a result (no guessed 
   await page.close();
 });
 
-test('if the judge never answers the lab times out after ONE click', async () => {
+test('if the judge never answers, Run Task is pressed again (at most twice more) and then the lab times out', async () => {
   seed('Lab silent', 'x', ['echo hi']);
   const page = await realLabPage(`${COUNT} /* the judge says nothing */`);
 
@@ -242,7 +242,24 @@ test('if the judge never answers the lab times out after ONE click', async () =>
 
   assert.equal(result.status, 'fail');
   assert.equal(result.verdict, 'Evaluation timeout');
-  assert.equal(await runsOf(page), 1);
+  const runs = await runsOf(page);
+  assert.ok(runs >= 2 && runs <= 3, `pressed ${runs} times`);
+  await page.close();
+});
+
+test('"Something went wrong, please try again" is the judge failing, not a wrong answer: Run Task is pressed again without asking the AI', async () => {
+  seed('Lab hiccup', 'x', ['echo hi']);
+  aiPrompts.length = 0;
+  const page = await realLabPage(`${COUNT}
+    if (window.__runs === 1) document.getElementById('tc').textContent = 'Evaluating Code, Done Something went wrong, please try again by clicking on submit';
+    if (window.__runs === 2) document.getElementById('tag').innerHTML = '<span class="status-tag-2 status-tag-2--success">Solved</span>';`);
+
+  const result = await solveAndSubmitLab(page, 'Lab hiccup', 'x', { ...FAST, maxTries: 3 });
+
+  assert.equal(result.status, 'pass', JSON.stringify(result));
+  assert.equal(await runsOf(page), 2);
+  assert.equal(await typedInTerminal(page), 'echo hi' + String.fromCharCode(10), 'the commands were typed once, not re-asked from the AI');
+  assert.equal(aiPrompts.length, 0, 'no AI call for a judge hiccup');
   await page.close();
 });
 

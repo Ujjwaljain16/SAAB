@@ -30,6 +30,13 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
         await purgeBotWidgets(page);
         await page.bringToFront().catch(() => {});
 
+        let maxwellFrame = null;
+        for (let launchRound = 1; launchRound <= 2 && !maxwellFrame; launchRound++) {
+        if (launchRound > 1) {
+            console.log('[Lab Solver] The terminal never started; reloading the page and launching once more...');
+            await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+            await page.waitForTimeout(T(3000));
+        }
         // 2. Launch the lab and VERIFY it started. This used to be fire-and-forget (click errors swallowed, nothing checked), and
         // getByText('Launch Lab').first() can match plain text in the problem statement instead of the real button.
         const launchPredicate = () =>
@@ -73,7 +80,6 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
 
         // 4. Wait for Maxwell terminal iframe to initialize and spinner to clear
         console.log('[Lab Solver] Waiting for Maxwell container terminal to initialize...');
-        let maxwellFrame = null;
         const waitStartedAt = Date.now();
         for (let i = 0; i < (opts.frameWaitAttempts ?? 120); i++) {
             await page.waitForTimeout(T(1000));
@@ -95,6 +101,8 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
                 console.log(`[Lab Solver] Maxwell container ready in ${Math.round((Date.now() - waitStartedAt) / 1000)}s! Frame URL: ${maxwellFrame.url()}`);
                 break;
             }
+        }
+
         }
 
         if (!maxwellFrame) {
@@ -217,6 +225,9 @@ async function submitAndAwaitVerdict(page, T, opts = {}) {
     const readPanel = () => page.evaluate((sel) => (document.querySelector(sel)?.innerText || '').replace(/\s+/g, ' ').trim(), SEL.labTestCases).catch(() => '');
     const PLACEHOLDER = /click on\s+["']?submit["']?\s+button to see the output/i;
     const RUNNING = /running|evaluating|executing|checking|processing|loading|please wait|in progress/i;
+    // The judge itself failing ("Something went wrong, please try again by clicking on submit") says nothing about the answer.
+    const JUDGE_HICCUP = /something went wrong|try again by clicking|please try again/i;
+    let pressesLeft = opts.maxRepresses ?? 2;
 
     // opts.forceSubmit is a test-only switch (see main.js --e2e-submit-lab): press the button even though the lab is already solved.
     if (!opts.forceSubmit && (await isSolved())) {
@@ -236,28 +247,37 @@ async function submitAndAwaitVerdict(page, T, opts = {}) {
         await page.waitForTimeout(T(1000));
     }
 
-    const before = await readPanel();
-    console.log('[Lab Solver] Clicking the submission button...');
-    const clickedAt = Date.now();
-    await submitBtn.click({ force: true });
-    await page.waitForTimeout(T(1500));
+    let before = await readPanel();
+    let clickedAt = Date.now();
+    let deadline = 0;
 
-    // Scaler: "Running a completed task will reset progress for all the next tasks." Never confirm that; cancel and stop.
-    const resetCancel = page.locator(SEL.labResetCancelBtn).first();
-    if (await resetCancel.isVisible().catch(() => false)) {
-        console.log('[Lab Solver] Scaler warns this would reset completed tasks. Cancelling to protect existing progress.');
-        await resetCancel.click({ force: true }).catch(() => {});
-        return { status: 'fail', stop: true, verdict: 'Stopped: running again would reset already-completed tasks' };
-    }
+    /** Press Run Task once. Returns a final result when the press must stop everything, else null. */
+    const press = async () => {
+        console.log('[Lab Solver] Clicking the submission button...');
+        clickedAt = Date.now();
+        await submitBtn.click({ force: true });
+        await page.waitForTimeout(T(1500));
 
-    // Any other plain confirmation dialog.
-    const proceedModal = page.locator(SEL.labProceedBtn).first();
-    if (await proceedModal.isVisible().catch(() => false)) {
-        console.log('[Lab Solver] Confirming Proceed modal...');
-        await proceedModal.click({ force: true });
-    }
+        // Scaler: "Running a completed task will reset progress for all the next tasks." Never confirm that; cancel and stop.
+        const resetCancel = page.locator(SEL.labResetCancelBtn).first();
+        if (await resetCancel.isVisible().catch(() => false)) {
+            console.log('[Lab Solver] Scaler warns this would reset completed tasks. Cancelling to protect existing progress.');
+            await resetCancel.click({ force: true }).catch(() => {});
+            return { status: 'fail', stop: true, verdict: 'Stopped: running again would reset already-completed tasks' };
+        }
 
-    const deadline = Date.now() + T(opts.evalTimeoutMs ?? 90000);
+        // Any other plain confirmation dialog.
+        const proceedModal = page.locator(SEL.labProceedBtn).first();
+        if (await proceedModal.isVisible().catch(() => false)) {
+            console.log('[Lab Solver] Confirming Proceed modal...');
+            await proceedModal.click({ force: true });
+        }
+        deadline = Date.now() + T(opts.evalTimeoutMs ?? 90000);
+        return null;
+    };
+
+    const stopped = await press();
+    if (stopped) return stopped;
     let last = null;
     let lastChangeAt = Date.now();
     while (Date.now() < deadline) {
@@ -270,6 +290,31 @@ async function submitAndAwaitVerdict(page, T, opts = {}) {
         if (text !== last) {
             last = text;
             lastChangeAt = Date.now();
+        }
+
+        // The judge failed on its side: wait a moment and press again (the answer is untouched), a couple of times at most.
+        if (pressesLeft > 0 && text && JUDGE_HICCUP.test(text) && Date.now() - clickedAt >= T(2000)) {
+            pressesLeft -= 1;
+            console.log('[Lab Solver] The judge reported an internal error (not a wrong answer); pressing Run Task again...');
+            await page.waitForTimeout(T(4000));
+            before = await readPanel();
+            const stoppedAgain = await press();
+            if (stoppedAgain) return stoppedAgain;
+            last = null;
+            lastChangeAt = Date.now();
+            continue;
+        }
+
+        // The click never started a run (the panel still says "Click on Submit to see the output"): press again, a couple of times at most.
+        if (pressesLeft > 0 && PLACEHOLDER.test(text) && Date.now() - clickedAt >= T(25000)) {
+            pressesLeft -= 1;
+            console.log('[Lab Solver] The judge never started; pressing Run Task again...');
+            before = await readPanel();
+            const stoppedAgain = await press();
+            if (stoppedAgain) return stoppedAgain;
+            last = null;
+            lastChangeAt = Date.now();
+            continue;
         }
 
         // A result is normally a CHANGE of the panel. But a retry can fail with exactly the same message as the previous try, which
