@@ -1,7 +1,7 @@
 # 🤖 SAAB — Scaler Automation AI Bot
 
 > **Clear your entire assignment backlog automatically.**  
-> SAAB is a production-grade AI agent that logs into your Scaler dashboard, crawls every pending assignment, and solves **all problem types** — coding (Java/JS), MCQs (including image-based), and DevOps terminal labs — with zero manual effort.
+> SAAB is an AI agent that logs into your Scaler dashboard, finds your pending assignments, and works through them: MCQs (including image-based), DevOps terminal labs, and coding problems. **Start with a dry run** (see "First run" below) and read "What has been verified" so you know what to trust.
 
 ![Architecture](arch.png)
 
@@ -53,10 +53,33 @@ A Chrome window will open. Log into Scaler normally (Google OAuth works). Close 
 
 ---
 
+## 🧪 First run (do this, in this order)
+
+1. `npm run dry-run:mcq`: logs in, finds your pending MCQs and prints the answers it WOULD give. Nothing is submitted.
+2. `node main.js --only-mcq --max-submissions=3`: a tiny live test. Check on Scaler that those 3 look right.
+3. Only then `npm run start:mcq`, and later labs / coding.
+
+Wrong MCQ answers use up the question's attempts (the page shows "N Attempts left"); SAAB makes at most 3 tries per MCQ. `npm start` waits 8 seconds and shows a LIVE-mode banner so you can cancel.
+
+## ✅ What has been verified (be honest with yourself about this)
+
+| Area | Status |
+|---|---|
+| Google login, session reuse, 3-session-limit page | Tested live |
+| Finding pending classes and problems, skipping solved ones | Tested live and in an offline mock site |
+| MCQ: solve, submit, 3 tries with rejected options excluded | Tested on a mock site; the live path ran on already-solved questions only |
+| DevOps labs: launch, terminal typing, "end previous lab" prompt | Tested live (on already-solved labs) |
+| Labs: pressing Run Task and reading the judge's feedback, retries | Run Task clicked once live; feedback reading and retries are tested on a mock only |
+| Coding problems (Monaco injection, verdict, retries) | **Not verified live** |
+| VS Code IDE problems | **Not verified live** |
+| BITS / Coursera (`--bits`) | Not reviewed; not covered by tests |
+
+If something looks wrong, check the `debug/` folder (screenshot + page HTML are saved on failures) and open an issue with them.
+
 ## 🎮 Run
 
 ```bash
-# Solve everything (recommended)
+# LIVE: submits real answers for everything it finds (read "First run" first)
 npm start
 
 # MCQs only — fastest, zero risk
