@@ -46,8 +46,8 @@ process.on('SIGTERM', () => handleStopSignal('SIGTERM', 'Terminated (SIGTERM)'))
 const DELAY = (ms) => new Promise(r => setTimeout(r, ms));
 
 // Refuse unknown CLI arguments: a typo like `npm run start :mcq` used to be ignored and silently ran EVERYTHING in live-submit mode.
-const KNOWN_FLAGS = ['--dry-run', '--submit', '--skip-labs', '--only-mcq', '--only-labs', '--bits', '--recheck', '--force', '--refresh-curriculum', '--live'];
-const KNOWN_PREFIXES = ['--class=', '--subject=', '--max-submissions=', '--course=', '--assignment='];
+const KNOWN_FLAGS = ['--log-time', '--dry-run', '--submit', '--skip-labs', '--only-mcq', '--only-labs', '--bits', '--recheck', '--force', '--refresh-curriculum', '--live'];
+const KNOWN_PREFIXES = ['--class=', '--subject=', '--max-submissions=', '--course=', '--assignment=', '--e2e-class=', '--e2e-submit-lab='];
 const unknownArgs = process.argv.slice(2).filter((a) => !KNOWN_FLAGS.includes(a) && !KNOWN_PREFIXES.some((p) => a.startsWith(p)));
 if (unknownArgs.length > 0) {
   console.error(`Unknown argument(s): ${unknownArgs.join(' ')}`);
@@ -63,6 +63,25 @@ const ONLY_MCQ = process.argv.includes('--only-mcq') || process.env.ONLY_MCQ ===
 const ONLY_LABS = process.argv.includes('--only-labs') || process.env.ONLY_LABS === 'true';
 const IS_BITS = process.argv.includes('--bits') || process.env.BITS === 'true';
 const RUN_STATE_PATH = dataPath('run-state.json');
+// TEST ONLY: --e2e-class=<id> runs the whole pipeline on ONE class even if it is fully solved (discovery, solved-skips and the
+// checkpoint are bypassed; progress goes to run-state.e2e.json, never your real checkpoint). Never use it for real work.
+const E2E_CLASS = process.argv.find(a => a.startsWith('--e2e-class='))?.split('=')[1] || '';
+// Prefix every log line with seconds since start, to find where a run lags.
+const LOG_TIME = process.argv.includes('--log-time') || process.env.SAAB_LOG_TIME === 'true';
+if (LOG_TIME) {
+  const t0 = Date.now();
+  for (const method of ['log', 'warn', 'error']) {
+    const original = console[method].bind(console);
+    console[method] = (...args) => original(`[+${((Date.now() - t0) / 1000).toFixed(1).padStart(6)}s]`, ...args);
+  }
+}
+// TEST ONLY, needs --e2e-class: press Run Task on ONE already-solved lab whose title contains this text, to exercise the submit path.
+// Scaler warns that running a completed task resets later tasks; the agent cancels that warning and stops (never confirms it).
+const E2E_SUBMIT_LAB = E2E_CLASS ? (process.argv.find(a => a.startsWith('--e2e-submit-lab='))?.split('=').slice(1).join('=') || '') : '';
+const labOptionsFor = (title) =>
+  E2E_SUBMIT_LAB && String(title).toLowerCase().includes(E2E_SUBMIT_LAB.toLowerCase()) ? { forceSubmit: true } : {};
+const solvedGuard = (page, opts) => (E2E_CLASS ? Promise.resolve(false) : isSolvedNow(page, opts));
+
 const SOLVE_CONCURRENCY = Math.max(1, Number(process.env.SOLVE_CONCURRENCY) || 4);
 // Safety valve: stop after this many submissions in one run (0 = unlimited). Workers may overshoot by SOLVE_CONCURRENCY - 1.
 // Tries per MCQ (each wrong answer is excluded from the next try); after that the question is left alone.
@@ -83,6 +102,10 @@ class AsyncMutex {
     return new Promise((resolve) => {
       this._queue.push(resolve);
     }).then(() => () => this.release());
+  }
+
+  isLocked() {
+    return this._locked;
   }
 
   release() {
@@ -183,6 +206,12 @@ async function run() {
   assertProviderConfigured();
 
   const runState = makeRunState(RUN_STATE_PATH);
+  if (E2E_CLASS) {
+    console.warn(`\n!!! TEST MODE (--e2e-class=${E2E_CLASS}): solved-skips are DISABLED for this one class. Progress goes to run-state.e2e.json. Do not use this for real work. !!!\n`);
+    runState.filePath = dataPath('run-state.e2e.json');
+    runState.completedProblems.clear();
+    runState.completedClasses.clear();
+  }
   const metrics = createRunMetrics();
   const userDataDir = process.env.SAAB_PROFILE_DIR
     ? path.resolve(process.env.SAAB_PROFILE_DIR)
@@ -242,7 +271,9 @@ async function run() {
     await safeGoto(mainPage, normalizeScalerUrl('https://www.scaler.com/academy/mentee-dashboard/core-curriculum/'));
     await ensureLoggedIn(mainPage, ctx, 'initial dashboard open');
 
-    const queue = await getQueue(mainPage);
+    const queue = E2E_CLASS
+      ? [{ classUrl: normalizeScalerUrl(`/academy/mentee-dashboard/class/${E2E_CLASS}`), pending: 'Assignment 0/0', subject: process.env.E2E_SUBJECT || 'SST DevOps & Cloud' }]
+      : await getQueue(mainPage);
     let filteredQueue = queue;
     if (SUBJECT_FILTER) {
       filteredQueue = filteredQueue.filter(({ subject }) => (subject || '').toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
@@ -308,12 +339,15 @@ async function run() {
 
         await mainPage.waitForSelector('tr.table__row a[href*="/assignment/problems/"], a.cr-p-navigation-dock-item[href*="/assignment/problems/"]', { timeout: 12000 }).catch(() => {});
 
+        // The question dock renders before the problems table. Reading too early gave dock-only data (titles like "Q 1") and lost
+        // the table's solved flags, so wait for the table itself (short, because some layouts only have the dock).
+        await mainPage.waitForSelector('tr.table__row a.me-cr-problem-list__name, tr.table__row a.me-cr-problem-actions__btn', { timeout: 6000 }).catch(() => {});
         const tableProblems = await collectAssignmentProblems(mainPage);
         const questionTabs = await collectQuestionTabs(mainPage);
         // Only real question links; if the table OR the dock says a problem is solved, it is solved and never touched.
         const problems = mergeProblems(tableProblems, questionTabs);
         for (const p of problems) {
-          if (p.isSolved) runState.completedProblems.add(p.solveUrl);
+          if (p.isSolved && !E2E_CLASS) runState.completedProblems.add(p.solveUrl);
         }
 
         if (problems.length === 0) {
@@ -350,6 +384,13 @@ async function run() {
 
       let problemQueueIndex = 0;
       let classAllPassed = true;
+      // Labs / IDE problems need the single shared container slot and take 30-40s each. A worker that finds the slot busy defers
+      // the problem instead of sitting idle, keeps doing other problems, and comes back to it when the slot is free.
+      const deferredLabs = [];
+      let inFlight = 0;
+      // A worker that took a deferred lab spends several seconds navigating before it actually locks the slot; count it as taken so a
+      // second worker does not grab another deferred lab in that window and end up blocked on the mutex.
+      let labsReserved = 0;
 
       async function runWorker(initialPage, workerId) {
         let page = initialPage;
@@ -366,10 +407,23 @@ async function run() {
             break;
           }
           let problem;
-          if (problemQueueIndex >= pendingProblems.length) {
+          let tookDeferred = false;
+          if (deferredLabs.length > 0 && !workspaceMutex.isLocked() && labsReserved === 0) {
+            // The lab/IDE slot is the bottleneck (one container at a time, 30-60s each): the moment it is free, refill it from the
+            // deferred labs instead of letting it sit idle until every other problem has been handed out.
+            problem = deferredLabs.shift();
+            tookDeferred = true;
+            labsReserved += 1;
+          } else if (problemQueueIndex < pendingProblems.length) {
+            problem = pendingProblems[problemQueueIndex++];
+          } else if (deferredLabs.length > 0 || inFlight > 0) {
+            // Nothing free to do right now, but another worker may still defer a lab or be about to finish one: wait, don't leave early.
+            await DELAY(500);
+            continue;
+          } else {
             break;
           }
-          problem = pendingProblems[problemQueueIndex++];
+          inFlight += 1;
 
           try {
 
@@ -387,7 +441,7 @@ async function run() {
           await safeGoto(page, normalizeScalerUrl(solveUrl));
           await ensureLoggedIn(page, ctx, `worker ${workerId} problem page`);
 
-          if (await isSolvedNow(page, { wait: true })) {
+          if (await solvedGuard(page, { wait: true })) {
             console.log(`  [Worker ${workerId}] Already solved on Scaler: ${problem.title}`);
             log.push({ title: problem.title, result: 'skipped' });
             markProblemComplete(runState, solveUrl);
@@ -395,7 +449,22 @@ async function run() {
           }
 
           const targetLanguage = resolveTargetLanguage(subject);
-          const type = await detectProblemType(page);
+          let type = await detectProblemType(page);
+          if (type === 'unknown') {
+            // Nothing recognisable has rendered (a slow page). Reload once and look again; never guess a problem type.
+            console.log(`  [Worker ${workerId}] Page not recognised yet; reloading once: ${problem.title}`);
+            await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+            await ensureLoggedIn(page, ctx, `worker ${workerId} reload`);
+            type = await detectProblemType(page);
+          }
+          if (type === 'unknown') {
+            console.log(`  [Worker ${workerId}] ✗ Could not recognise the problem type; skipping (no AI calls made): ${problem.title}`);
+            await snapshotPage(page, 'unrecognized-problem-type', problem.title);
+            metrics.problemsFailed += 1;
+            classAllPassed = false;
+            log.push({ title: problem.title, result: 'fail' });
+            continue;
+          }
           console.log(`  [Worker ${workerId}] Detected problem type: ${type} for ${problem.title}`);
           if (type === 'coding' && (await page.locator(SEL.problemEditor).count()) === 0) {
             await snapshotPage(page, 'unrecognized-problem-type', problem.title);
@@ -425,11 +494,17 @@ async function run() {
               continue;
             }
 
+            if (workspaceMutex.isLocked() && !problem.deferred) {
+              problem.deferred = true;
+              deferredLabs.push(problem);
+              console.log(`  [Worker ${workerId}] Lab/IDE slot is busy; moving on and coming back to: ${problem.title}`);
+              continue;
+            }
             const release = await workspaceMutex.acquire();
             try {
               console.log(`  [Worker ${workerId}] Executing Maxwell container lab: ${problem.title}...`);
               // Waiting for the shared lab slot can take minutes: re-check before touching a container.
-              if (await isSolvedNow(page)) {
+              if (await solvedGuard(page)) {
                 console.log(`  [Worker ${workerId}] Already solved (found while waiting for the lab slot): ${problem.title}`);
                 log.push({ title: problem.title, result: 'skipped' });
                 markProblemComplete(runState, solveUrl);
@@ -445,10 +520,15 @@ async function run() {
               metrics.solveAttempts += 1;
               metrics.submitAttempts += 1;
 
+              const labOptions = labOptionsFor(problem.title);
+              if (labOptions.forceSubmit) {
+                console.warn(`  [Worker ${workerId}] !!! TEST MODE: Run Task WILL be pressed on this already-solved lab: ${problem.title} !!!`);
+              }
               const labResult = await solveAndSubmitLab(
                 page,
                 problem.title,
-                `${problemContent.title}\n\n${problemContent.body}`
+                `${problemContent.title}\n\n${problemContent.body}`,
+                labOptions
               );
 
               log.push({ title: problem.title, result: labResult.status });
@@ -484,10 +564,16 @@ async function run() {
               continue;
             }
 
+            if (workspaceMutex.isLocked() && !problem.deferred) {
+              problem.deferred = true;
+              deferredLabs.push(problem);
+              console.log(`  [Worker ${workerId}] Lab/IDE slot is busy; moving on and coming back to: ${problem.title}`);
+              continue;
+            }
             const release = await workspaceMutex.acquire();
             try {
               console.log(`  [Worker ${workerId}] Solving VS Code IDE problem: ${problem.title}...`);
-              if (await isSolvedNow(page)) {
+              if (await solvedGuard(page)) {
                 console.log(`  [Worker ${workerId}] Already solved (found while waiting for the IDE slot): ${problem.title}`);
                 log.push({ title: problem.title, result: 'skipped' });
                 markProblemComplete(runState, solveUrl);
@@ -522,7 +608,7 @@ async function run() {
                 continue;
               }
 
-              if (await isSolvedNow(page)) {
+              if (await solvedGuard(page)) {
                 console.log(`  [Worker ${workerId}] Became solved while the AI was working; not submitting: ${problem.title}`);
                 log.push({ title: problem.title, result: 'skipped' });
                 markProblemComplete(runState, solveUrl);
@@ -581,7 +667,7 @@ async function run() {
                 // After a wrong answer the page can be left in an odd state: reload for a clean question and a fresh solved check.
                 await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
                 await ensureLoggedIn(page, ctx, `worker ${workerId} mcq retry`);
-                if (await isSolvedNow(page, { wait: true })) {
+                if (await solvedGuard(page, { wait: true })) {
                   console.log(`  [Worker ${workerId}] Already solved; stopping retries: ${problem.title}`);
                   log.push({ title: problem.title, result: 'skipped' });
                   markProblemComplete(runState, solveUrl);
@@ -622,7 +708,7 @@ async function run() {
               }
 
               // The AI call takes time; make sure the problem is still unsolved right before clicking anything.
-              if (await isSolvedNow(page)) {
+              if (await solvedGuard(page)) {
                 console.log(`  [Worker ${workerId}] Became solved while the AI was working; not submitting: ${problem.title}`);
                 log.push({ title: problem.title, result: 'skipped' });
                 markProblemComplete(runState, solveUrl);
@@ -674,7 +760,7 @@ async function run() {
             if (globalHaltRun) break;
 
             // A slow judge verdict (or another worker / the user) may already have solved it: never submit onto a solved problem.
-            if (attempt > 1 && (await isSolvedNow(page))) {
+            if (attempt > 1 && (await solvedGuard(page))) {
               alreadySolved = true;
               break;
             }
@@ -725,7 +811,7 @@ async function run() {
               break;
             }
 
-            if (await isSolvedNow(page)) {
+            if (await solvedGuard(page)) {
               alreadySolved = true;
               break;
             }
@@ -798,6 +884,9 @@ async function run() {
                 break;
               }
             }
+          } finally {
+            inFlight -= 1;
+            if (tookDeferred) labsReserved -= 1;
           }
         }
       }
