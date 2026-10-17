@@ -107,8 +107,23 @@ export async function selectProblemLanguage(page, targetLanguage) {
 
 export async function extractProblemContent(page) {
   const title = normalizeProblemTitle(await page.title());
-  const rawBody = await page.locator('body').innerText().catch(() => '');
 
+  // The real statement lives in `.cr-p-statement` on every problem type (MCQ, coding, lab, confirmed on real captures). Use it when it
+  // is there: it is exactly the problem text, with none of the page chrome around it.
+  const statement = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('.cr-p-statement'))
+      .map((el) => (el.innerText || '').trim())
+      .filter(Boolean)
+      .join('\n\n')
+  ).catch(() => '');
+  if (statement.length >= 30) {
+    return { title, body: statement.replace(/\n{3,}/g, '\n\n').slice(0, 12000) };
+  }
+
+  // Fallback for a page without that element: take the whole page text, starting at "Problem Description" if it exists. The end
+  // markers are only searched AFTER the start. They used to be searched from the very top, and a lab page (no "Problem Description")
+  // was cut at "Refer Friends" in the navigation bar, leaving the AI with the 15 characters "HomeSST Goodies" instead of the task.
+  const rawBody = await page.locator('body').innerText().catch(() => '');
   let body = rawBody || '';
   const start = body.search(/problem\s+description/i);
   if (start !== -1) {
@@ -123,11 +138,12 @@ export async function extractProblemContent(page) {
     /refer\s+friends/i
   ];
 
+  const searchFrom = start === -1 ? Math.min(400, Math.floor(body.length / 4)) : 0;
   let cutAt = body.length;
   for (const marker of endMarkers) {
-    const match = marker.exec(body);
+    const match = marker.exec(body.slice(searchFrom));
     if (match && typeof match.index === 'number') {
-      cutAt = Math.min(cutAt, match.index);
+      cutAt = Math.min(cutAt, searchFrom + match.index);
     }
   }
 
@@ -323,35 +339,43 @@ export function isLoginUrl(url) {
   return /\/(login|sign_in)\b/i.test(url || '');
 }
 
-export async function detectProblemType(page) {
-  // Wait briefly for React problem controls to mount
-  await page.waitForFunction(() => {
-    const isMcq = document.querySelectorAll('.cr-multiple-choice, input[type="radio"], input[type="checkbox"]').length > 0;
-    const hasMonaco = document.querySelector('.monaco-editor') != null;
-    const btns = Array.from(document.querySelectorAll('button, a'));
-    const hasLauncher = btns.some(b => (b.innerText || '').match(/open ide|launch lab|launch|vs\s*code/i));
-    return isMcq || hasMonaco || hasLauncher;
-  }, { timeout: 5000 }).catch(() => {});
+export async function detectProblemType(page, { timeoutMs = 20000 } = {}) {
+  // Wait for the problem controls to mount. Only SPECIFIC markers count; a loose text match on "launch"/"vs code" anywhere in the
+  // page (the statement, a nav link) used to end this wait too early or classify the page wrongly. Pages can take 7s+ to render
+  // when several load at once, so wait generously: the wait ends the moment a marker appears, so fast pages are not slowed down.
+  await page.waitForFunction((sel) => {
+    const q = (s) => document.querySelector(s) != null;
+    const idButton = Array.from(document.querySelectorAll('button, a')).some((b) => /^open\s*(in\s*)?(the\s*)?(ide|vs\s*code)$/i.test((b.innerText || '').trim()));
+    return q('.cr-multiple-choice-container, .cr-multiple-choice') || q('.monaco-editor') || q(sel.launch) || q(sel.ide) ||
+      q('iframe[src*="maxwell"]') || idButton;
+  }, { launch: SEL.labLaunchBtn, ide: SEL.ideContainer }, { timeout: timeoutMs }).catch(() => {});
 
-  const isMcq = (await page.locator('.cr-multiple-choice, input[type="radio"], input[type="checkbox"]').count()) > 0;
+  // MCQ: the real marker only (a stray checkbox elsewhere on a coding/lab page must not make it an MCQ).
+  const isMcq = (await page.locator('.cr-multiple-choice, .cr-multiple-choice-container').count()) > 0;
   if (isMcq) return 'mcq';
 
-  // Check for VS Code IDE (open IDE button without Maxwell/terminal markers)
-  const isVSCode = await page.evaluate((ideSel) => {
-    if (document.querySelector(ideSel)) return true;
-    const btns = Array.from(document.querySelectorAll('button, a, span, div'));
-    return btns.some(b => (b.innerText || '').trim().match(/^open\s*ide$|vs\s*code/i));
-  }, SEL.ideContainer).catch(() => false);
-  if (isVSCode) return 'vscode';
-
-  // Check for Maxwell terminal labs (Launch Lab button or maxwell iframe)
+  // Maxwell terminal lab: very specific markers (the Launch Lab button element, or the maxwell iframe). Checked BEFORE the IDE
+  // because a lab's statement can mention "VS Code"; it was once misclassified as a VS Code problem because of that.
   const isLab = await page.evaluate((launchSel) => {
     if (document.querySelector('iframe[src*="maxwell"], iframe[allow*="clipboard-read"]')) return true;
     if (document.querySelector(launchSel)) return true;
-    const btns = Array.from(document.querySelectorAll('button, a, span, div'));
-    return btns.some(b => (b.innerText || '').trim().match(/^launch\s*(lab)?$/i));
+    return Array.from(document.querySelectorAll('button, a')).some((b) => /^launch\s*lab$/i.test((b.innerText || '').trim()));
   }, SEL.labLaunchBtn).catch(() => false);
   if (isLab) return 'lab';
 
-  return 'coding';
+  // VS Code IDE problem: the IDE container, or a short button/link that IS the "Open IDE" / "Open in VS Code" action.
+  // Never a text match inside bigger containers (innerText of a div includes everything nested in it).
+  const isVSCode = await page.evaluate((ideSel) => {
+    if (document.querySelector(ideSel)) return true;
+    return Array.from(document.querySelectorAll('button, a')).some((b) => {
+      const t = (b.innerText || '').trim();
+      return t.length > 0 && t.length <= 40 && /^(open\s*(in\s*)?(the\s*)?(ide|vs\s*code)|vs\s*code)$/i.test(t);
+    });
+  }, SEL.ideContainer).catch(() => false);
+  if (isVSCode) return 'vscode';
+
+  // "Coding" needs POSITIVE evidence: a code editor. Defaulting to coding when nothing was recognised made slow-loading MCQ pages
+  // get "solved" as code (3 wasted AI attempts and a failure). Nothing recognised yet means "not loaded": the caller reloads once.
+  const hasEditor = (await page.locator('.monaco-editor').count()) > 0;
+  return hasEditor ? 'coding' : 'unknown';
 }

@@ -164,3 +164,92 @@ test('MCQ verdict state ignores free text: a title with "solved" in it neither p
   assert.equal((await readMcqState(right)).solved, true);
   await right.close();
 });
+
+// ---- Page-type detection must not be fooled by words in the problem statement -------------------------------------------------------
+test('a lab whose statement mentions "VS Code" is still a lab (regression: Q3 was classified as vscode live)', async () => {
+  const withMention = LAB_HTML.replace('<div class="cr-infra-mage-judge">', '<div class="html-content__container cr-p-statement">Tip: you may also use VS Code locally, then use the lab terminal.</div><div class="cr-infra-mage-judge">');
+  const page = await pageWith(withMention);
+  assert.equal(await detectProblemType(page), 'lab');
+  await page.close();
+});
+
+test('VS Code detection needs a real IDE container or an actual "Open IDE" button, never just the words', async () => {
+  const mention = await pageWith(`${heading('Q1', '<span class="status-tag-2">Unsolved</span>')}
+    <div class="html-content__container cr-p-statement">Edit the file in VS Code and run the tests.</div>
+    <div class="monaco-editor"></div>`);
+  assert.equal(await detectProblemType(mention), 'coding', 'words alone must not make it an IDE problem');
+  await mention.close();
+
+  const open = await pageWith(`${heading('Q2', '<span class="status-tag-2">Unsolved</span>')}<a class="btn">Open IDE</a>`);
+  assert.equal(await detectProblemType(open), 'vscode');
+  await open.close();
+
+  const openVs = await pageWith(`${heading('Q3', '<span class="status-tag-2">Unsolved</span>')}<button>Open in VS Code</button>`);
+  assert.equal(await detectProblemType(openVs), 'vscode');
+  await openVs.close();
+
+  const container = await pageWith(`${heading('Q4', '<span class="status-tag-2">Unsolved</span>')}<div id="vscode-ide"></div>`);
+  assert.equal(await detectProblemType(container), 'vscode');
+  await container.close();
+});
+
+test('a stray checkbox on a coding page does not make it an MCQ', async () => {
+  const page = await pageWith(`${CODING_HTML}<label><input type="checkbox"> Dark mode</label>`);
+  assert.equal(await detectProblemType(page), 'coding');
+  await page.close();
+});
+
+// ---- What the AI is actually given as "the problem" -----------------------------------------------------------------------------------
+import { extractProblemContent } from '../scaler_page.js';
+
+const NAV = '<div><a>Home</a><a>SST Goodies</a><div>Refer Friends to SST</div><div>Join Discord Community</div><div>Learn AND Practice</div></div>';
+const FOOTER = '<footer>All subjects and classes</footer>';
+
+test('lab: the AI receives the real task statement, not the navigation bar (regression: it got "HomeSST Goodies")', async () => {
+  const statement = 'In this assignment, you will practice basic Linux commands. For each task, store your answer in a file named answer.txt using the echo command. Note: use password user@123! for sudo.';
+  const page = await pageWith(`${NAV}${heading('Q1. Basic Linux Commands - 1', '<span class="status-tag-2 status-tag-2--attention">Unsolved</span>')}
+    <div class="html-content__container cr-p-statement">${statement}</div><div class="html-content__container cr-p-statement"></div>${LAB_HTML}${FOOTER}`, 'Basic Linux Commands - 1 - Problem | Scaler Academy');
+  const got = await extractProblemContent(page);
+  await page.close();
+
+  assert.equal(got.title, 'Basic Linux Commands - 1');
+  assert.equal(got.body, statement, 'exactly the statement element, nothing from the page chrome');
+  assert.ok(!/goodies|refer friends/i.test(got.body));
+});
+
+test('extractor fallback: without a statement element, a "Refer Friends" in the top navigation must not truncate the text', async () => {
+  const page = await pageWith(`${NAV}<main>Task: create /home/user/a.txt containing the word hello, then print it. Use the terminal on the right.</main>${FOOTER}`);
+  const got = await extractProblemContent(page);
+  await page.close();
+
+  assert.ok(got.body.includes('create /home/user/a.txt'), `body was: ${JSON.stringify(got.body)}`);
+  assert.ok(got.body.length > 40, 'not the 15-character nav stub');
+});
+
+test('extractor fallback still starts at "Problem Description" when the page has one', async () => {
+  const page = await pageWith(`${NAV}<main>Problem Description Given an array, return its sum. Expected Output 3</main>`);
+  const got = await extractProblemContent(page);
+  await page.close();
+  assert.ok(got.body.startsWith('Problem Description'));
+  assert.ok(!/expected output/i.test(got.body), 'still cut at the end marker');
+});
+
+// ---- A slow-rendering page must never be mistaken for a coding problem ------------------------------------------------------------------
+test('a page whose MCQ renders late is waited for and detected as mcq (regression: it was "solved" as code and failed)', async () => {
+  const page = await pageWith(`<div id="root">loading...</div>
+    <script>setTimeout(() => { document.getElementById('root').innerHTML = ${JSON.stringify(MCQ_HTML)}; }, 900);</script>`);
+  assert.equal(await detectProblemType(page, { timeoutMs: 5000 }), 'mcq');
+  await page.close();
+});
+
+test('nothing recognisable yet is "unknown", never a guess of "coding"', async () => {
+  const page = await pageWith('<div>still loading, nothing to see</div>');
+  assert.equal(await detectProblemType(page, { timeoutMs: 400 }), 'unknown');
+  await page.close();
+});
+
+test('"coding" requires a real code editor on the page', async () => {
+  const page = await pageWith(CODING_HTML);
+  assert.equal(await detectProblemType(page, { timeoutMs: 2000 }), 'coding');
+  await page.close();
+});
