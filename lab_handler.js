@@ -1,23 +1,38 @@
-import { solveTerminalLab } from './solver.js';
+import { solveTerminalLab, commitSolution, evictSolution } from './solver.js';
+import { sanitizeLabCommands } from './lab_guard.js';
+import { SEL } from './config.js';
+import { purgeBotWidgets } from './page_utils.js';
 
 /**
  * Robust handler to automate DevOps Maxwell Container Labs on Scaler
  */
-export async function solveAndSubmitLab(page, problemTitle, problemStatement) {
+export async function solveAndSubmitLab(page, problemTitle, problemStatement, opts = {}) {
+    const trace = {};
+    const result = await runLab(page, problemTitle, problemStatement, trace, opts);
+
+    // Only a judge-confirmed solution may be reused later; a failed one must never be replayed from cache.
+    if (trace.cacheKey) {
+        if (result.status === 'pass') commitSolution(trace.cacheKey, trace.solution);
+        else evictSolution(trace.cacheKey);
+    }
+    return result;
+}
+
+async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
+    // opts.timeScale shrinks the fixed waits (tests use ~0.05); opts.frameWaitAttempts bounds the container wait.
+    const T = (ms) => Math.round(ms * (opts.timeScale ?? 1));
     try {
         console.log(`\n[Lab Solver] Starting automation for: ${problemTitle}`);
 
         // 1. Purge SolveBot widget & floating distractions
-        await page.evaluate(() => {
-            document.querySelectorAll('.SolveBotWidget-module_container__Sttx-, .Companion-module_root__ZGYyu, [class*="SolveBot"]').forEach(e => e.remove());
-        }).catch(() => {});
+        await purgeBotWidgets(page);
 
         // 2. Click "Launch Lab" if present
         const launchLocator = page.getByText('Launch Lab').first();
         if (await launchLocator.isVisible({ timeout: 4000 }).catch(() => false)) {
             console.log('[Lab Solver] Clicking Launch Lab button...');
             await launchLocator.click().catch(() => {});
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(T(2000));
         }
 
         // 3. Handle "End Previous Lab" or "Save and Open New Workspace" modal
@@ -25,14 +40,14 @@ export async function solveAndSubmitLab(page, problemTitle, problemStatement) {
         if (await endPrevBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
             console.log('[Lab Solver] Ending previous lab session...');
             await endPrevBtn.click().catch(() => {});
-            await page.waitForTimeout(3000);
+            await page.waitForTimeout(T(3000));
         }
 
         // 4. Wait for Maxwell terminal iframe to initialize and spinner to clear
         console.log('[Lab Solver] Waiting for Maxwell container terminal to initialize...');
         let maxwellFrame = null;
-        for (let i = 0; i < 40; i++) {
-            await page.waitForTimeout(3000);
+        for (let i = 0; i < (opts.frameWaitAttempts ?? 40); i++) {
+            await page.waitForTimeout(T(3000));
             maxwellFrame = page.frames().find(f => f.url().includes('maxwell'));
             const isLaunching = await page.evaluate(() => document.body.innerText.includes('Launching the Lab')).catch(() => false);
             if (maxwellFrame && !isLaunching) {
@@ -51,7 +66,15 @@ export async function solveAndSubmitLab(page, problemTitle, problemStatement) {
         // 5. Query Gemini AI for exact Linux commands
         console.log('[Lab Solver] Requesting terminal commands from Gemini AI...');
         const labResult = await solveTerminalLab(problemTitle, problemStatement);
-        const commands = labResult.commands || [];
+        trace.cacheKey = labResult.cacheKey;
+        const { commands, rejected } = sanitizeLabCommands(labResult.commands);
+        trace.solution = { commands, reasoning: labResult.reasoning };
+        for (const r of rejected) {
+            console.log(`[Lab Solver] Refused unsafe/invalid command (${r.reason}): ${r.command}`);
+        }
+        if (rejected.length > 0) {
+            return { status: 'fail', verdict: 'Refused unsafe/invalid AI-generated commands' };
+        }
         console.log(`[Lab Solver] Generated ${commands.length} commands. Reasoning: ${labResult.reasoning || ''}`);
 
         if (commands.length === 0) {
@@ -65,7 +88,7 @@ export async function solveAndSubmitLab(page, problemTitle, problemStatement) {
         console.log('[Lab Solver] Focusing Maxwell terminal...');
         const terminal = maxwellFrame.locator('.xterm, textarea.xterm-helper-textarea, canvas.xterm-text-layer').first();
         await terminal.click({ force: true }).catch(() => {});
-        await page.waitForTimeout(800);
+        await page.waitForTimeout(T(800));
 
         // 7. Type commands line by line — use maxwellFrame.keyboard so input goes to the iframe's xterm, not the main page
         console.log(`[Lab Solver] Executing ${commands.length} bash commands...`);
@@ -77,10 +100,10 @@ export async function solveAndSubmitLab(page, problemTitle, problemStatement) {
             await maxwellFrame.keyboard.press('Enter');
             // Wait for command to finish — simple heuristic: 600ms per command, more for installs
             const isSlowCmd = /apt|apt-get|yum|dnf|pip|npm|wget|curl|git clone|make|docker|systemctl/i.test(cmd);
-            await page.waitForTimeout(isSlowCmd ? 3500 : 700);
+            await page.waitForTimeout(T(isSlowCmd ? 3500 : 700));
         }
 
-        await page.waitForTimeout(2500);
+        await page.waitForTimeout(T(2500));
 
         // 8. Multi-Task Execution & Submission Loop
         console.log('[Lab Solver] Starting task execution and submission loop...');
@@ -95,7 +118,7 @@ export async function solveAndSubmitLab(page, problemTitle, problemStatement) {
                 return { status: 'pass', verdict: 'Correct Answer' };
             }
 
-            const submitBtn = page.locator('a.Submit-module_btn__tpMzw, button.Submit-module_btn__tpMzw, button:has-text("Run Task"), a:has-text("Run Task"), button:has-text("Submit")').first();
+            const submitBtn = page.locator(SEL.labSubmitBtn).first();
             if (!(await submitBtn.isVisible().catch(() => false))) {
                 console.log('[Lab Solver] Submit button not visible on loop', taskLoop);
                 break;
@@ -103,30 +126,30 @@ export async function solveAndSubmitLab(page, problemTitle, problemStatement) {
 
             // Wait if button is disabled
             for (let r = 0; r < 5; r++) {
-                const isDisabled = await submitBtn.evaluate(el => el.classList.contains('Tappable-module_disabled__XhpfV') || el.disabled);
+                const isDisabled = await submitBtn.evaluate(el => /disabled/i.test(el.className) || el.disabled || el.getAttribute('aria-disabled') === 'true');
                 if (!isDisabled) break;
-                await page.waitForTimeout(1000);
+                await page.waitForTimeout(T(1000));
             }
 
             console.log(`[Lab Solver] Clicking submission button (Task iteration ${taskLoop})...`);
             await submitBtn.click({ force: true });
 
             // Handle any Proceed modal or StageResetWarning modal
-            await page.waitForTimeout(1500);
-            const proceedModal = page.locator('a.StageResetWarningModal-module_proceedButton__-erRt, a:has-text("Proceed"), button:has-text("Proceed")').first();
+            await page.waitForTimeout(T(1500));
+            const proceedModal = page.locator(SEL.labProceedBtn).first();
             if (await proceedModal.isVisible().catch(() => false)) {
                 console.log('[Lab Solver] Confirming Proceed modal...');
                 await proceedModal.click({ force: true });
             }
 
             // Wait for evaluation
-            await page.waitForTimeout(4000);
-            const evalState = await page.evaluate(() => {
+            await page.waitForTimeout(T(4000));
+            const evalState = await page.evaluate((testCaseSel) => {
                 const heading = document.querySelector('.cr-p-heading')?.innerText || '';
-                const testCases = document.querySelector('.TestCases-module_container__3P-4y, [class*="TestCase"]')?.innerText || '';
+                const testCases = document.querySelector(testCaseSel)?.innerText || '';
                 const hasFailed = /Wrong Answer|Test Case Failed/i.test(testCases);
                 return { isSolved: heading.includes('Solved'), hasFailed, testCases: testCases.slice(0, 200) };
-            });
+            }, SEL.labTestCases);
 
             if (evalState.isSolved) {
                 console.log('[Lab Solver] ✓ Lab is fully SOLVED!');

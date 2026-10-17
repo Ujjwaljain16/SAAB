@@ -1,3 +1,5 @@
+import { purgeBotWidgets } from './page_utils.js';
+
 /**
  * mcq_handler.js
  * Handles MCQ scraping and answer injection for Scaler assignments.
@@ -102,12 +104,7 @@ export async function slurpMCQContext(page) {
 export async function injectMCQAnswer(page, bestOptionIndex) {
     try {
         // 1. Purge the floating SolveBot widget from DOM so it cannot intercept clicks
-        await page.evaluate(() => {
-            document.querySelectorAll(
-                '.SolveBotWidget-module_container__Sttx-, .Companion-module_root__ZGYyu, ' +
-                '.SolveBotWidget-module_botImage__orvhM, [class*="SolveBot"]'
-            ).forEach(b => b.remove());
-        }).catch(() => {});
+        await purgeBotWidgets(page);
 
         // 2. Click the exact option
         const clicked = await page.evaluate((idx) => {

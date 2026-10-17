@@ -28,6 +28,15 @@ export const SEL = {
   // Result
   resultPass:     '.test-result:has-text("Passed")',
   resultFail:     '.test-result:has-text("Failed")',
+
+  // Scaler uses CSS-modules, so class names carry a build hash (e.g. Submit-module_btn__tpMzw) that changes
+  // on every deploy. Match the stable prefix with [class*=...] instead of the full hashed name.
+  botWidgets:     '[class*="SolveBot"], [class*="Companion-module_root"]',
+  ideContainer:   '#vscode-ide, [class*="EditorLayout-module_container"], .code-editor-layer',
+  labLaunchBtn:   '[class*="LaunchButton-module_btn"]',
+  labSubmitBtn:   'a[class*="Submit-module_btn"], button[class*="Submit-module_btn"], button:has-text("Run Task"), a:has-text("Run Task"), button:has-text("Submit")',
+  labProceedBtn:  'a[class*="StageResetWarningModal-module_proceedButton"], a:has-text("Proceed"), button:has-text("Proceed")',
+  labTestCases:   '[class*="TestCases-module_container"], [class*="TestCase"]',
 };
 
 // Target Subjects: If specified in .env, filter to those; otherwise SAAB auto-discovers all subjects in the current term!
