@@ -23,6 +23,11 @@ const GROQ_MODELS = ((process.env.GROQ_MODELS || '').trim() || 'llama-3.3-70b-ve
   .filter(Boolean);
 const MAX_OUTPUT_TOKENS = Math.min(32768, Math.max(512, Number(process.env.MAX_OUTPUT_TOKENS) || 4096));
 
+// Providers that reported a DAILY quota exhaustion stay off for the rest of the process (per-minute limits do not count).
+const deadGeminiKeys = new Set();
+const deadGroqModels = new Set();
+let grokDead = false;
+
 export const solverStats = {
   cacheHits: 0,
   cacheMisses: 0,
@@ -53,6 +58,23 @@ function getApiKeys() {
 
 const API_KEYS = getApiKeys();
 const CLIENTS = API_KEYS.map((k) => new GoogleGenerativeAI(k));
+
+/** Next Gemini key that is not out of daily quota, or -1 when every key is exhausted. */
+function nextGeminiClientIndex() {
+  for (let n = 0; n < CLIENTS.length; n++) {
+    const idx = (nextGeminiKeyIndex++) % CLIENTS.length;
+    if (!deadGeminiKeys.has(idx)) return idx;
+  }
+  return -1;
+}
+
+/** True when every configured provider has hit its daily quota: there is nothing left to try today. */
+export function allProvidersExhausted() {
+  const geminiOk = CLIENTS.some((_, i) => !deadGeminiKeys.has(i));
+  const groqOk = Boolean(GROQ_API_KEY) && GROQ_MODELS.concat(GROQ_MODEL).some((m) => !deadGroqModels.has(m));
+  const grokOk = Boolean(GROK_API_KEY && GROK_MODEL) && !grokDead;
+  return hasAnyProvider() && !(geminiOk || groqOk || grokOk);
+}
 
 export function hasAnyProvider() {
   return CLIENTS.length > 0 || Boolean(GROK_API_KEY) || Boolean(GROQ_API_KEY);
@@ -303,11 +325,13 @@ function isDailyQuotaExceeded(error) {
   }
 
   const msg = String(error?.message || '');
-  return /perday|daily|free_tier_requests/i.test(msg);
+  // Deliberately NOT matching "free_tier_requests": that id also appears in per-MINUTE 429s, which must never mark a key dead.
+  return /per.?day|daily/i.test(msg);
 }
 
 function isDailyQuotaMessage(message) {
-  return /perday|daily|quota|free_tier_requests|limit reached/i.test(String(message || ''));
+  // Only genuine per-day limits are fatal for the run; "rate limit reached ... try again in 2s" is just a pause.
+  return /per.?day|\bTPD\b|\bRPD\b|daily/i.test(String(message || ''));
 }
 
 function parseRetryDelayFromText(text, fallback = 5) {
@@ -325,6 +349,9 @@ async function generateWithGrok(promptText) {
     return { ok: false, type: 'provider_unavailable', message: 'Grok model not configured' };
   }
 
+  if (grokDead) {
+    return { ok: false, type: 'rate_limit', retryAfterSeconds: 3600, fatal: true, message: 'Grok is out of daily quota' };
+  }
   await paceApiCall('grok');
   let res;
   try {
@@ -359,6 +386,7 @@ async function generateWithGrok(promptText) {
   if (!res.ok) {
     const retryHeader = Number(res.headers.get('retry-after') || 0);
     const errMsg = String(data?.error?.message || data?.message || `Grok HTTP ${res.status}`);
+    if (res.status === 429 && isDailyQuotaMessage(errMsg)) grokDead = true;
     const retryAfterSeconds = retryHeader > 0 ? retryHeader : parseRetryDelayFromText(errMsg, 5);
 
     if (res.status === 429) {
@@ -391,6 +419,10 @@ async function generateWithGrok(promptText) {
 async function generateWithGroq(promptText, modelName = GROQ_MODEL, maxTokens = MAX_OUTPUT_TOKENS, responseFormat = null) {
   if (!GROQ_API_KEY) {
     return { ok: false, type: 'provider_unavailable', message: 'Groq key not configured' };
+  }
+
+  if (deadGroqModels.has(modelName)) {
+    return { ok: false, type: 'rate_limit', retryAfterSeconds: 3600, fatal: true, message: `Groq model ${modelName} is out of daily quota` };
   }
 
   const payload = {
@@ -449,6 +481,7 @@ async function generateWithGroq(promptText, modelName = GROQ_MODEL, maxTokens = 
   if (!res.ok) {
     const retryHeader = Number(res.headers.get('retry-after') || 0);
     const errMsg = String(data?.error?.message || data?.message || `Groq HTTP ${res.status}`);
+    if (res.status === 429 && isDailyQuotaMessage(errMsg)) deadGroqModels.add(modelName);
     const retryAfterSeconds = retryHeader > 0 ? retryHeader : parseRetryDelayFromText(errMsg, 5);
 
     if (res.status === 429) {
@@ -670,9 +703,8 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
 
   let bestCandidate = '';
   let minRetrySeconds = Number.MAX_SAFE_INTEGER;
-  let exhaustedGeminiKeys = 0;
   let exhaustedGrok = false;
-  const exhaustedGroqModels = new Set();
+  const exhaustedGroqModels = new Set(deadGroqModels);
   let sawRateLimit = false;
 
   let previousFailureFeedback = compactFeedback;
@@ -682,6 +714,7 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
       : buildRetryPrompt(prompt, previousFailureFeedback, modelAttempt, language, selectedLanguageLabel, requiredMethodNames, starterSignatures);
 
     for (let i = 0; i < CLIENTS.length; i++) {
+      if (deadGeminiKeys.has(i)) continue;
       const geminiModel = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
       const model = CLIENTS[i].getGenerativeModel({ model: geminiModel });
       let result;
@@ -704,7 +737,7 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
           minRetrySeconds = Math.min(minRetrySeconds, retrySec);
 
           if (isDailyQuotaExceeded(error)) {
-            exhaustedGeminiKeys += 1;
+            deadGeminiKeys.add(i);
             continue;
           }
 
@@ -815,7 +848,7 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
     return { ok: true, code: repairedBest, cacheKey };
   }
 
-  const geminiAllExhausted = CLIENTS.length > 0 ? exhaustedGeminiKeys >= CLIENTS.length : true;
+  const geminiAllExhausted = CLIENTS.length > 0 ? deadGeminiKeys.size >= CLIENTS.length : true;
   const grokAllExhausted = GROK_API_KEY ? exhaustedGrok : true;
   const groqAllExhausted = GROQ_API_KEY ? GROQ_MODELS.every((m) => exhaustedGroqModels.has(m)) : true;
 
@@ -903,7 +936,8 @@ Example output:
     const maxTries = Math.max(6, CLIENTS.length * 3);
 
     for (let tryCount = 0; tryCount < maxTries; tryCount++) {
-      const clientIdx = (nextGeminiKeyIndex++) % CLIENTS.length;
+      const clientIdx = nextGeminiClientIndex();
+      if (clientIdx < 0) break;
       const client = CLIENTS[clientIdx];
 
       try {
@@ -923,7 +957,7 @@ Example output:
         const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(e.message || '');
         if (is429) {
           solverStats.rateLimits++;
-          if (isDailyQuotaExceeded(e)) { console.log(`    Gemini MCQ key ${clientIdx + 1} daily quota exceeded.`); continue; }
+          if (isDailyQuotaExceeded(e)) { deadGeminiKeys.add(clientIdx); console.log(`    Gemini MCQ key ${clientIdx + 1} is out of daily quota; skipping it for the rest of this run.`); continue; }
           const waitMs = Math.min(2500 * (tryCount + 1), 12000);
           console.log(`    Gemini MCQ key ${clientIdx + 1} rate-limited. Waiting ${waitMs / 1000}s...`);
           await new Promise(r => setTimeout(r, waitMs));
@@ -941,8 +975,14 @@ Example output:
     }
   }
 
-  // Fallback to groq if available
-  if (GROQ_API_KEY) {
+  // Groq cannot see images. For an image-based question its text prompt only says "[Question is in the attached image]",
+  // so it would be guessing blind: refuse rather than submit a guess.
+  if (screenshot64 && GROQ_API_KEY) {
+    console.log('    [MCQ] Image-based question and no vision-capable provider left (Gemini only); not guessing with a text-only model.');
+  }
+
+  // Fallback to groq if available (text-only questions)
+  if (GROQ_API_KEY && !screenshot64) {
     try {
       solverStats.groqRequests++;
       const gResult = await generateWithGroq(textPrompt, GROQ_MODEL, 2048, "application/json");
@@ -958,7 +998,7 @@ Example output:
   }
 
   // Never invent an answer: callers must treat this as a failed solve and not submit it.
-  return { failed: true, bestOptionIndex: null, reasoning: 'No provider returned a valid answer.', cacheKey };
+  return { failed: true, fatal: allProvidersExhausted(), bestOptionIndex: null, reasoning: 'No provider returned a valid answer.', cacheKey };
 }
 
 export async function solveWorkspace(problemContent, workspaceMap) {
@@ -996,7 +1036,8 @@ Keep non-modified files UNCHANGED (do not include them in fileMap).
   if (CLIENTS.length > 0) {
     const modelName = (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim();
     for (let tryCount = 0; tryCount < Math.max(2, CLIENTS.length); tryCount++) {
-      const clientIdx = (nextGeminiKeyIndex++) % CLIENTS.length;
+      const clientIdx = nextGeminiClientIndex();
+      if (clientIdx < 0) break;
       const client = CLIENTS[clientIdx];
       try {
         await paceApiCall(`gemini:${clientIdx}`);
@@ -1010,7 +1051,7 @@ Keep non-modified files UNCHANGED (do not include them in fileMap).
         console.log(`    Gemini Workspace key ${clientIdx + 1} failed: ${errMsg.slice(0, 100)}...`);
         const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(errMsg);
         if (is429) {
-          if (isDailyQuotaExceeded(e)) continue;
+          if (isDailyQuotaExceeded(e)) { deadGeminiKeys.add(clientIdx); continue; }
           await new Promise(r => setTimeout(r, 2000 * (tryCount + 1)));
           continue;
         }
@@ -1041,7 +1082,7 @@ Keep non-modified files UNCHANGED (do not include them in fileMap).
   return { reasoning: 'failed', fileMap: {} };
 }
 
-function makeLabCacheKey(title, statement) {
+export function makeLabCacheKey(title, statement) {
   return 'lab_' + crypto.createHash('sha256').update(`LAB_V2:${title}\n${statement}`).digest('hex');
 }
 
@@ -1083,7 +1124,8 @@ Rules:
     const maxTries = Math.max(4, CLIENTS.length * 2);
 
     for (let tryCount = 0; tryCount < maxTries; tryCount++) {
-      const clientIdx = (nextGeminiKeyIndex++) % CLIENTS.length;
+      const clientIdx = nextGeminiClientIndex();
+      if (clientIdx < 0) break;
       const client = CLIENTS[clientIdx];
 
       try {
@@ -1107,7 +1149,8 @@ Rules:
         if (is429) {
           solverStats.rateLimits++;
           if (isDailyQuotaExceeded(e)) {
-            console.log(`    Gemini key ${clientIdx + 1} daily quota exhausted, skipping key.`);
+            deadGeminiKeys.add(clientIdx);
+            console.log(`    Gemini key ${clientIdx + 1} is out of daily quota; skipping it for the rest of this run.`);
             continue;
           }
           const waitMs = Math.min(2500 * (tryCount + 1), 10000);
