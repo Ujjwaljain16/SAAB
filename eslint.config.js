@@ -8,7 +8,7 @@ export default [
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'module',
-      globals: { ...globals.node, window: 'readonly', document: 'readonly', DataTransfer: 'readonly', ClipboardEvent: 'readonly' }
+      globals: { ...globals.node, window: 'readonly', document: 'readonly', location: 'readonly', DataTransfer: 'readonly', ClipboardEvent: 'readonly' }
     },
     rules: {
       'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }],

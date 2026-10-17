@@ -162,21 +162,41 @@ export async function extractEditorStarterCode(page) {
   return textareaValue || '';
 }
 
+// Only `/assignment/problems/<id>` is a question. The same page also links `/<id>/submissions` and `/<id>/help-requests`
+// (per row, plus icon links); those are NOT questions and used to be "solved" as if they were, re-solving solved work.
+const PROBLEM_PATH_SOURCE = String.raw`/assignment/problems/[^/?#]+/?$`;
+
+export function isProblemHref(href) {
+  try {
+    return new RegExp(PROBLEM_PATH_SOURCE).test(new URL(href, 'https://www.scaler.com').pathname);
+  } catch {
+    return false;
+  }
+}
+
 export async function collectAssignmentProblems(page) {
-  return page.$$eval('tr.table__row', (rows) =>
-    rows
+  return page.$$eval('tr.table__row', (rows, patternSource) => {
+    const isProblem = (href) => {
+      try {
+        return new RegExp(patternSource).test(new URL(href, location.origin).pathname);
+      } catch {
+        return false;
+      }
+    };
+
+    return rows
       .map((row) => {
-        const nameLink = row.querySelector('a[href*="/assignment/problems/"]');
-        const solveLink = row.querySelector('a.me-cr-classroom-url.me-cr-problem-actions__btn[href*="/assignment/problems/"]');
+        const links = Array.from(row.querySelectorAll('a[href*="/assignment/problems/"]'))
+          .filter((a) => isProblem(a.getAttribute('href') || ''));
+        if (links.length === 0) return null;
+
+        const nameLink = links.find((a) => a.classList.contains('me-cr-problem-list__name')) || links[0];
+        const solveLink = links.find((a) => a.classList.contains('me-cr-problem-actions__btn'));
         const targetLink = solveLink || nameLink;
 
-        if (!targetLink) {
-          return null;
-        }
-
-        const title = (nameLink?.textContent || row.querySelector('td')?.textContent || '').trim();
+        const title = (nameLink.textContent || row.querySelector('td')?.textContent || '').trim();
         const statusText = (row.innerText || '').trim().replace(/\s+/g, ' ');
-        const isSolved = /solved|100\s*\/\s*100/i.test(statusText) && !/unsolved/i.test(statusText);
+        const isSolved = /\bsolved\b|100\s*\/\s*100/i.test(statusText) && !/\bunsolved\b/i.test(statusText);
 
         return {
           title: title || 'Problem',
@@ -185,45 +205,49 @@ export async function collectAssignmentProblems(page) {
           isSolved,
         };
       })
-      .filter(Boolean)
-  );
+      .filter(Boolean);
+  }, PROBLEM_PATH_SOURCE);
 }
 
 export async function collectQuestionTabs(page) {
-  return page.$$eval('a.cr-p-navigation-dock-item[href*="/assignment/problems/"], a[href*="/assignment/problems/"]', (tabs) =>
-    tabs
+  return page.$$eval('a.cr-p-navigation-dock-item[href*="/assignment/problems/"], a[href*="/assignment/problems/"]', (tabs, patternSource) => {
+    const isProblem = (href) => {
+      try {
+        return new RegExp(patternSource).test(new URL(href, location.origin).pathname);
+      } catch {
+        return false;
+      }
+    };
+
+    return tabs
       .map((tab) => {
         const href = tab.getAttribute('href') || '';
-        if (!href.includes('/assignment/problems/')) {
-          return null;
-        }
+        if (!isProblem(href)) return null;
+
         const text = (tab.textContent || '').trim().replace(/\s+/g, ' ');
         const isSolved = tab.classList.contains('cr-p-navigation-dock-item--success') ||
                          tab.classList.contains('me-cr-p-nav-dock-item--success') ||
                          tab.querySelector('svg[class*="success"], i[class*="check"], [class*="status-tag--success"]') != null;
 
         return {
-          title: text || `Question ${href.split('/').pop()}`,
+          title: text || `Question ${href.split('?')[0].split('/').pop()}`,
           solveUrl: href,
           isSolved,
         };
       })
-      .filter(Boolean)
-  );
+      .filter(Boolean);
+  }, PROBLEM_PATH_SOURCE);
 }
 
 export async function getProblemSolveState(page) {
-  await page.waitForSelector('.cr-p-heading .status-tag-2, .cr-p-heading [class*="status"], [class*="status-tag"]', { timeout: 2500 }).catch(() => {});
+  await page.waitForSelector('.cr-p-heading [class*="status-tag"], [class*="status-tag"]', { timeout: 4000 }).catch(() => {});
   return page.evaluate(() => {
-    const headingEl = document.querySelector('.cr-p-heading .status-tag-2, .cr-p-heading [class*="status"], [class*="status-tag"]');
-    if (headingEl) {
-      const text = (headingEl.textContent || '').trim().toLowerCase();
-      if (text.includes('solved') && !text.includes('unsolved')) return 'solved';
-      if (text.includes('unsolved')) return 'unsolved';
-      if (text.includes('attempted')) return 'attempted';
-    }
-    const hasSolvedBadge = document.querySelector('.cr-p-heading .status-tag-2--success, .status-tag--success, [class*="status-tag--success"]') != null;
-    if (hasSolvedBadge) return 'solved';
+    // Look at every status tag, not just the first: a "Mandatory" tag usually comes before the Solved/Unsolved one.
+    const tags = Array.from(document.querySelectorAll('.cr-p-heading [class*="status"], [class*="status-tag"]'));
+    const texts = tags.map((t) => (t.textContent || '').trim().toLowerCase());
+    if (texts.some((t) => t.includes('unsolved'))) return 'unsolved';
+    if (texts.some((t) => /\bsolved\b/.test(t)) || tags.some((t) => /status-tag(-2)?--success/.test(String(t.className)))) return 'solved';
+    if (texts.some((t) => t.includes('attempted'))) return 'attempted';
     return 'unsolved';
   }).catch(() => 'unknown');
 }
