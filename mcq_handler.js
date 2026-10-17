@@ -1,4 +1,5 @@
 import { purgeBotWidgets } from './page_utils.js';
+import { getProblemSolveState } from './scaler_page.js';
 
 /**
  * mcq_handler.js
@@ -87,13 +88,41 @@ export async function slurpMCQContext(page) {
         }
     }
 
+    // Real MCQ pages show "Choose the correct answer from below : 2 Attempts left" (.cr-multiple-choice-container__hint-chip).
+    // A wrong answer burns an attempt, so the caller must know how many are left. null = the page does not say.
+    const attemptsLeft = await page.evaluate(() => {
+        const el = document.querySelector('.cr-multiple-choice-container__hint-chip, .cr-multiple-choice-container__heading');
+        const m = (el?.innerText || '').match(/(\d+)\s*attempts?\s*left/i);
+        return m ? Number(m[1]) : null;
+    }).catch(() => null);
+
     return {
+        attemptsLeft,
         title: title.replace(/\s*-\s*Problem.*$/i, '').trim(),
         body,
         options,
         screenshotBase64,   // null if text-based question
         isImageBased: bodyIsEmpty && !!screenshotBase64
     };
+}
+
+/**
+ * Snapshot of everything that can say how an MCQ submission went. Compared before and after the click.
+ */
+export async function readMcqState(page) {
+    // solved/attempted come ONLY from the status-tag elements (Solved / Attempted / Unsolved). Never from free heading text: a question
+    // titled "Never gets solved" would otherwise be read as solved and a wrong answer would be cached as correct.
+    const state = await getProblemSolveState(page, { wait: false });
+    const rest = await page.evaluate(() => {
+        const chip = document.querySelector('.cr-multiple-choice-container__hint-chip, .cr-multiple-choice-container__heading')?.innerText || '';
+        const m = chip.match(/(\d+)\s*attempts?\s*left/i);
+        return {
+            attemptsLeft: m ? Number(m[1]) : null,
+            green: document.querySelector('[style*="background-color: rgb(82, 196, 26)"], .cr-multiple-choice--correct') != null,
+            danger: document.querySelector('.status-tag-2--danger, .status-tag-2--red') != null
+        };
+    }).catch(() => ({ attemptsLeft: null, green: false, danger: false }));
+    return { solved: state === 'solved', attempted: state === 'attempted', ...rest };
 }
 
 /**
@@ -145,6 +174,8 @@ export async function injectMCQAnswer(page, bestOptionIndex) {
             await page.waitForTimeout(600);
         }
 
+        const before = await readMcqState(page);
+
         // 4. Click Submit — use evaluate to force-remove disabled class if needed
         await page.evaluate(() => {
             const btn = document.querySelector(
@@ -168,32 +199,23 @@ export async function injectMCQAnswer(page, bestOptionIndex) {
             await page.waitForTimeout(800);
         }
 
-        // 6. Poll for verdict on problem heading or option highlight
+        // 6. Poll for a verdict. The verdict is decided by what CHANGED since before the click, never by a badge that was already
+        // there: after a wrong first try (or on a question that was already "Attempted") the Attempted badge is on the page from the
+        // start, so reading it as "wrong answer" would report a verdict before the new submission was even judged.
         const start = Date.now();
         while (Date.now() - start < 10000) {
-            const outcome = await page.evaluate(() => {
-                const heading = document.querySelector('.cr-p-heading__text, .cr-p-heading')?.innerText || '';
-                const hasSolvedBadge =
-                    heading.includes('Solved') ||
-                    document.querySelector('.status-tag-2--success, .status-tag-2--green') != null;
-                const hasGreenOption =
-                    document.querySelector('[style*="background-color: rgb(82, 196, 26)"], [style*="background-color: green"], .cr-multiple-choice--correct') != null;
+            const now = await readMcqState(page);
 
-                if (hasSolvedBadge || hasGreenOption) return 'pass';
-
-                const hasAttempted = heading.includes('Attempted');
-                const hasDanger = document.querySelector('.status-tag-2--danger, .status-tag-2--red') != null;
-                if (hasAttempted || hasDanger) return 'fail';
-
-                return null;
-            }).catch(() => null);
-
-            if (outcome) {
-                return {
-                    status: outcome,
-                    verdict: outcome === 'pass' ? 'Correct' : 'Incorrect'
-                };
+            if (now.solved || now.green) {
+                return { status: 'pass', verdict: 'Correct' };
             }
+
+            const attemptsDropped = now.attemptsLeft != null && before.attemptsLeft != null && now.attemptsLeft < before.attemptsLeft;
+            const becameAttempted = now.attempted && !before.attempted;
+            if (now.danger || attemptsDropped || becameAttempted) {
+                return { status: 'fail', verdict: 'Incorrect' };
+            }
+
             await page.waitForTimeout(300);
         }
 
