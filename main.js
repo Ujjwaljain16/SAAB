@@ -205,6 +205,17 @@ async function run() {
 
   assertProviderConfigured();
 
+  // A first-time user who types `npm start` by reflex would otherwise start submitting for real without any warning.
+  if (!DRY_RUN && !E2E_CLASS && process.env.SAAB_NO_BANNER !== 'true') {
+    console.log('\n==================================================================');
+    console.log(' LIVE MODE: SAAB will SUBMIT answers on your Scaler account.');
+    console.log(' Wrong MCQ answers use up attempts. First time? Press Ctrl+C now and run:');
+    console.log('   npm run dry-run:mcq                          (previews answers, submits nothing)');
+    console.log('   node main.js --only-mcq --max-submissions=3  (a small live test)');
+    console.log('==================================================================\n');
+    await DELAY(8000);
+  }
+
   const runState = makeRunState(RUN_STATE_PATH);
   if (E2E_CLASS) {
     console.warn(`\n!!! TEST MODE (--e2e-class=${E2E_CLASS}): solved-skips are DISABLED for this one class. Progress goes to run-state.e2e.json. Do not use this for real work. !!!\n`);
@@ -937,6 +948,8 @@ async function run() {
 }
 
 run().catch((err) => {
-  console.error(err);
+  // Setup mistakes (no API key, ...) get a plain message, not a stack trace; real bugs keep theirs.
+  if (err?.expected) console.error(`\n${err.message}\n`);
+  else console.error(err);
   process.exitCode = 1;
 });

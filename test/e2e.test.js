@@ -82,6 +82,7 @@ function runAgent(args) {
         SAAB_HEADLESS: 'true',
         SAAB_BROWSER_CHANNEL: browserChannel,
         SAAB_TEST_ROUTES: path.join(repo, 'test', 'e2e', 'mock_scaler.js'),
+        SAAB_NO_BANNER: 'true',
         MOCK_LOG: mockLog,
         SOLVE_CONCURRENCY: '2',
         API_SPACING_MS: '0',

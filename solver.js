@@ -191,7 +191,13 @@ export function hasAnyProvider() {
 /** Call once at startup of a run; importing this module no longer kills the process. */
 export function assertProviderConfigured() {
   if (!hasAnyProvider()) {
-    throw new Error('No AI provider API key found. Set GEMINI_API_KEY, GROQ_API_KEY, or GROK_API_KEY in .env');
+    const err = new Error(
+      'No AI provider API key found.\n' +
+      'Create a file named .env (copy .env.example) and set GEMINI_API_KEY (free at aistudio.google.com)\n' +
+      'or GROQ_API_KEY (free at console.groq.com).'
+    );
+    err.expected = true;
+    throw err;
   }
 }
 
