@@ -168,7 +168,8 @@ SAAB
 ├── mcq_handler.js       ← MCQ scraper (text + screenshot), answer injector
 ├── lab_handler.js       ← Maxwell terminal lab: Launch → AI commands → xterm type → Submit
 ├── workspace_manager.js ← VS Code IDE: Monaco file extraction → AI solve → re-inject
-├── crawler.js           ← Curriculum discovery with 6h cache
+├── code_utils.js        ← Pure helpers for cleaning/validating LLM output (unit-tested)
+├── lab_guard.js         ← Refuses destructive/unsafe AI-generated lab shell commands
 ├── config.js            ← All CSS selectors (update here if Scaler changes DOM)
 └── auth.js              ← One-time login session creator
 ```
@@ -185,8 +186,11 @@ Gemini (key 1) → Gemini (key 2..N) → Groq (model 1) → Groq (model 2) → G
 ## 🛡️ Reliability Features
 
 - **Run state checkpoint** — resumes exactly where it left off after a crash or Ctrl+C
-- **6h curriculum cache** — doesn't re-crawl the dashboard every run (`--refresh-curriculum` to force)
-- **Disk solution cache** — SHA-256 keyed; never calls AI twice for the same problem
+- **Short curriculum cache** — 2 min by default (`CURRICULUM_CACHE_TTL_MS` to change, `--refresh-curriculum` to force)
+- **Verified-only solution cache** — SHA-256 keyed; an answer is cached only after Scaler confirms it passed, and evicted if it fails (wrong MCQ options are remembered so they aren't re-submitted)
+- **No guessed answers** — if no provider returns a valid MCQ answer nothing is submitted
+- **Lab command guard** — destructive/exfiltrating commands from the model are refused
+- **Ctrl+C** — first press saves state and stops cleanly, second press force-quits; fatal errors exit non-zero
 - **Session auto-recovery** — detects `/login` redirect and re-authenticates mid-run
 - **SolveBot purge** — removes Scaler's floating AI widget before every interaction
 - **Proceed modal handling** — automatically confirms confirmation dialogs
@@ -226,7 +230,8 @@ Elapsed: 142s
 - **Never commit `.env` or `session.json`** — they contain your password and active session cookies
 - **`temp_chrome_profile/`** is gitignored — it holds your Chrome login state
 - Reduce `SOLVE_CONCURRENCY` to `1` if you hit "too many requests" errors on Scaler's side
-- On first run, let the crawler finish fully — it builds `curriculum-cache.json` which speeds up all future runs
+- On first run, let the crawler finish fully — it builds `curriculum-cache.json` which speeds up repeat runs
+- Run `npm test` for the unit tests
 
 ---
 

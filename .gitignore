@@ -18,3 +18,5 @@ curriculum-cache.json
 *.png
 !arch.png
 data/
+runs/
+debug/

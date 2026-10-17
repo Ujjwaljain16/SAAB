@@ -14,12 +14,19 @@
     "test:bits": "node test_bits_dom.js",
     "dry-run": "node main.js --dry-run",
     "dry-run:mcq": "node main.js --dry-run --only-mcq",
-    "auth": "node auth.js"
+    "auth": "node auth.js",
+    "test": "node --test \"test/*.test.js\"",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "dotenv": "^16.4.5",
     "fs-extra": "^11.3.4",
     "playwright": "^1.48.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^17.13.0"
   }
 }
