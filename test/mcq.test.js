@@ -24,7 +24,8 @@ function mcqHtml({ attempts = 2, tag = UNSOLVED, radioAttrs = '', onSubmit = '' 
     window.__submits = 0;
     const submit = document.getElementById('submit');
     document.querySelectorAll('input').forEach((i) => i.addEventListener('change', () => submit.classList.remove('disabled')));
-    submit.addEventListener('click', () => { if (submit.classList.contains('disabled')) return; window.__submits++; ${onSubmit} });
+    // Scaler's real Submit is a "tappable" button: a script-made click (isTrusted false) does nothing.
+    submit.addEventListener('click', (e) => { if (!e.isTrusted || submit.classList.contains('disabled')) return; window.__submits++; ${onSubmit} });
   </script>`;
 }
 

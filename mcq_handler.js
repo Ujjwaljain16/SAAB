@@ -197,7 +197,13 @@ export async function injectMCQAnswer(page, bestOptionIndex, opts = {}) {
 
         // 4. Submit: a real click when the button is enabled, a forced one only as the last resort.
         const submitBtn = page.locator(SUBMIT_SEL).first();
-        const realSubmit = enabled && (await submitBtn.click({ timeout: 4000 }).then(() => true).catch(() => false));
+        // Scaler's Submit is a "tappable" button: it reacts to real mouse/touch events and ignores a synthetic element.click(), which
+        // is why the old script-only click timed out with the page unchanged ("2 Attempts left", still Unsolved).
+        let realSubmit = await submitBtn.click({ timeout: 4000, force: !enabled }).then(() => true).catch(() => false);
+        if (!realSubmit) {
+            await submitBtn.evaluate((el) => el.classList.remove('disabled')).catch(() => {});
+            realSubmit = await submitBtn.click({ timeout: 3000, force: true }).then(() => true).catch(() => false);
+        }
         if (!realSubmit) {
             await page.evaluate((sel) => {
                 const btn = document.querySelector(sel) || Array.from(document.querySelectorAll('button')).find((b) => /^submit$/i.test((b.innerText || '').trim()));
