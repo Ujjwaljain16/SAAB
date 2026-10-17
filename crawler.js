@@ -1,13 +1,12 @@
 import { SEL, TARGET_SUBJECTS } from './config.js';
 import { normalizeScalerUrl } from './scaler_url.js';
 import fs from 'fs';
-import path from 'path';
 import crypto from 'crypto';
+import { dataPath, envNumber } from './paths.js';
+import { snapshotPage } from './page_utils.js';
 
-const CURRICULUM_CACHE_PATH = path.join(process.cwd(), 'curriculum-cache.json');
-const CURRICULUM_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes (dynamic refresh for added/modified questions)
-const API_CACHE_PATH = path.join(process.cwd(), 'api-endpoints.json');
-const API_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const CURRICULUM_CACHE_PATH = dataPath('curriculum-cache.json');
+const CURRICULUM_CACHE_TTL_MS = envNumber('CURRICULUM_CACHE_TTL_MS', 2 * 60 * 1000); // default 2 min so new/changed questions show up quickly
 
 export function parseProgressCount(text) {
   if (!text) return null;
@@ -19,43 +18,6 @@ export function parseProgressCount(text) {
   if (Number.isNaN(completed) || Number.isNaN(total)) return null;
 
   return { completed, total };
-}
-
-function loadApiCache() {
-  try {
-    if (!fs.existsSync(API_CACHE_PATH)) {
-      return { version: 1, updatedAt: null, subjects: {} };
-    }
-
-    const raw = fs.readFileSync(API_CACHE_PATH, 'utf-8');
-    const parsed = JSON.parse(raw);
-    return {
-      version: 1,
-      updatedAt: parsed.updatedAt || null,
-      subjects: parsed.subjects && typeof parsed.subjects === 'object' ? parsed.subjects : {}
-    };
-  } catch {
-    return { version: 1, updatedAt: null, subjects: {} };
-  }
-}
-
-function saveApiCache(cache) {
-  try {
-    const payload = {
-      version: 1,
-      updatedAt: new Date().toISOString(),
-      subjects: cache.subjects || {}
-    };
-    const tmp = API_CACHE_PATH + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2));
-    fs.renameSync(tmp, API_CACHE_PATH);
-  } catch {}
-}
-
-function isFreshApiCache(cache) {
-  if (!cache.updatedAt) return false;
-  const age = Date.now() - new Date(cache.updatedAt).getTime();
-  return Number.isFinite(age) && age <= API_CACHE_TTL_MS;
 }
 
 function makeCurriculumCacheKey(term, subjects) {
@@ -138,6 +100,7 @@ export async function getQueue(page) {
 
   if (discoveredSubjects.length === 0) {
     console.log('No subjects found in core curriculum. Checking if already on classes list...');
+    await snapshotPage(page, 'no-subjects-found');
   }
 
   // Filter subjects if user defined TARGET_SUBJECTS in .env
@@ -155,6 +118,7 @@ export async function getQueue(page) {
   });
 
   // Check cache
+  const cacheKey = makeCurriculumCacheKey(activeTerm, targetSubjects.map((s) => s.name));
   const cached = readCurriculumCache();
   const isCacheBypassed = process.argv.includes('--refresh-curriculum') || process.argv.includes('--live') || process.argv.includes('--recheck') || process.argv.includes('--force');
   if (cached && cached.cacheKey === cacheKey && cached.queue.length > 0 && !isCacheBypassed) {
