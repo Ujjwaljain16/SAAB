@@ -3,7 +3,8 @@ import { chromium } from 'playwright';
 import { getQueue, parseProgressCount } from './crawler.js';
 import {
   solve, solverStats, looksTruncated, solveMCQ, solveWorkspace,
-  commitSolution, evictSolution, recordWrongMCQOption, assertProviderConfigured, allProvidersExhausted, getQuotaReport
+  commitSolution, evictSolution, recordWrongMCQOption, assertProviderConfigured, allProvidersExhausted, getQuotaReport,
+  getWrongMCQOptions, makeMCQCacheKey
 } from './solver.js';
 import { injectAndSubmit } from './injector.js';
 import { slurpWorkspaceContext, injectWorkspaceContext, waitForWorkspaceReady } from './workspace_manager.js';
@@ -64,6 +65,8 @@ const IS_BITS = process.argv.includes('--bits') || process.env.BITS === 'true';
 const RUN_STATE_PATH = dataPath('run-state.json');
 const SOLVE_CONCURRENCY = Math.max(1, Number(process.env.SOLVE_CONCURRENCY) || 4);
 // Safety valve: stop after this many submissions in one run (0 = unlimited). Workers may overshoot by SOLVE_CONCURRENCY - 1.
+// Tries per MCQ (each wrong answer is excluded from the next try); after that the question is left alone.
+const MAX_MCQ_TRIES = Math.max(1, Number(process.env.MCQ_MAX_TRIES) || 3);
 const MAX_SUBMISSIONS = Math.max(0, Number(process.argv.find(a => a.startsWith('--max-submissions='))?.split('=')[1] ?? process.env.MAX_SUBMISSIONS) || 0);
 
 class AsyncMutex {
@@ -570,55 +573,90 @@ async function run() {
               classAllPassed = false;
               continue;
             }
-            problemContent = await slurpMCQContext(page);
-            console.log(`  [Worker ${workerId}] Solving MCQ: ${problem.title}`);
-            const mcqResult = await solveMCQ(problemContent);
-
-            if (mcqResult.failed) {
-              if (mcqResult.fatal) {
-                globalHaltRun = true;
-                globalHaltReason = 'All AI providers are out of daily quota. Add GROQ_API_KEY (free) or more GEMINI_API_KEYS, or resume tomorrow - progress is checkpointed.';
+            // Up to MAX_MCQ_TRIES tries per question (default 3). Each wrong answer is remembered and excluded from the next try; after
+            // the last try (or if earlier runs already burned that many) the question is left alone.
+            let mcqFinished = false;
+            for (let mcqTry = 1; mcqTry <= MAX_MCQ_TRIES && !mcqFinished && !globalHaltRun; mcqTry++) {
+              if (mcqTry > 1) {
+                // After a wrong answer the page can be left in an odd state: reload for a clean question and a fresh solved check.
+                await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+                await ensureLoggedIn(page, ctx, `worker ${workerId} mcq retry`);
+                if (await isSolvedNow(page, { wait: true })) {
+                  console.log(`  [Worker ${workerId}] Already solved; stopping retries: ${problem.title}`);
+                  log.push({ title: problem.title, result: 'skipped' });
+                  markProblemComplete(runState, solveUrl);
+                  break;
+                }
               }
-              metrics.problemsFailed += 1;
-              classAllPassed = false;
-              log.push({ title: problem.title, result: 'fail' });
-              console.log(`  [Worker ${workerId}] ✗ MCQ not answered (no valid AI answer, nothing submitted): ${problem.title}`);
-              continue;
-            }
 
-            if (DRY_RUN) {
-              metrics.problemsDryRun += 1;
-              log.push({ title: problem.title, result: 'dry-run' });
-              console.log(`  [Worker ${workerId}] ↺ DRY-RUN MCQ Option: ${mcqResult.bestOptionIndex + 1}`);
-              continue;
-            }
+              problemContent = await slurpMCQContext(page);
+              const triedWrong = getWrongMCQOptions(makeMCQCacheKey(problemContent));
+              if (triedWrong.length >= MAX_MCQ_TRIES) {
+                console.log(`  [Worker ${workerId}] Already tried ${triedWrong.length} wrong answers (limit ${MAX_MCQ_TRIES}); leaving it: ${problem.title}`);
+                log.push({ title: problem.title, result: 'skipped' });
+                classAllPassed = false;
+                break;
+              }
 
-            // The AI call takes time; make sure the problem is still unsolved right before clicking anything.
-            if (await isSolvedNow(page)) {
-              console.log(`  [Worker ${workerId}] Became solved while the AI was working; not submitting: ${problem.title}`);
-              log.push({ title: problem.title, result: 'skipped' });
-              markProblemComplete(runState, solveUrl);
-              continue;
-            }
+              const attemptsNote = problemContent.attemptsLeft == null ? '' : `, ${problemContent.attemptsLeft} attempt(s) left on page`;
+              console.log(`  [Worker ${workerId}] Solving MCQ (try ${mcqTry}/${MAX_MCQ_TRIES}${attemptsNote}): ${problem.title}`);
+              const mcqResult = await solveMCQ(problemContent);
 
-            metrics.submitAttempts += 1;
-            const mcqInjectResult = await injectMCQAnswer(page, mcqResult.bestOptionIndex);
-            log.push({ title: problem.title, result: mcqInjectResult.status });
+              if (mcqResult.failed) {
+                if (mcqResult.fatal) {
+                  globalHaltRun = true;
+                  globalHaltReason = 'All AI providers are out of daily quota. Add GROQ_API_KEY (free) or more GEMINI_API_KEYS, or resume tomorrow - progress is checkpointed.';
+                }
+                metrics.problemsFailed += 1;
+                classAllPassed = false;
+                log.push({ title: problem.title, result: 'fail' });
+                console.log(`  [Worker ${workerId}] ✗ MCQ not answered (no valid AI answer, nothing submitted): ${problem.title}`);
+                break;
+              }
 
-            if (mcqInjectResult.status === 'pass') {
-              metrics.problemsSolved += 1;
-              console.log(`  [Worker ${workerId}] ✓ MCQ Passed: ${problem.title}`);
-              commitSolution(mcqResult.cacheKey, { bestOptionIndex: mcqResult.bestOptionIndex, reasoning: mcqResult.reasoning });
-              markProblemComplete(runState, solveUrl);
-            } else {
-              metrics.problemsFailed += 1;
-              classAllPassed = false;
+              if (DRY_RUN) {
+                metrics.problemsDryRun += 1;
+                log.push({ title: problem.title, result: 'dry-run' });
+                console.log(`  [Worker ${workerId}] ↺ DRY-RUN MCQ Option: ${mcqResult.bestOptionIndex + 1}`);
+                break;
+              }
+
+              // The AI call takes time; make sure the problem is still unsolved right before clicking anything.
+              if (await isSolvedNow(page)) {
+                console.log(`  [Worker ${workerId}] Became solved while the AI was working; not submitting: ${problem.title}`);
+                log.push({ title: problem.title, result: 'skipped' });
+                markProblemComplete(runState, solveUrl);
+                break;
+              }
+
+              metrics.submitAttempts += 1;
+              const mcqInjectResult = await injectMCQAnswer(page, mcqResult.bestOptionIndex);
+
+              if (mcqInjectResult.status === 'pass') {
+                metrics.problemsSolved += 1;
+                log.push({ title: problem.title, result: 'pass' });
+                console.log(`  [Worker ${workerId}] ✓ MCQ Passed (try ${mcqTry}): ${problem.title}`);
+                commitSolution(mcqResult.cacheKey, { bestOptionIndex: mcqResult.bestOptionIndex, reasoning: mcqResult.reasoning });
+                markProblemComplete(runState, solveUrl);
+                break;
+              }
+
               evictSolution(mcqResult.cacheKey);
-              if (mcqInjectResult.verdict === 'Incorrect') {
+              console.log(`  [Worker ${workerId}] ✗ MCQ ${mcqInjectResult.verdict} (try ${mcqTry}/${MAX_MCQ_TRIES}): ${problem.title}`);
+
+              const confirmedWrong = mcqInjectResult.verdict === 'Incorrect';
+              if (confirmedWrong) {
                 recordWrongMCQOption(mcqResult.cacheKey, mcqResult.bestOptionIndex);
               }
-              console.log(`  [Worker ${workerId}] ✗ MCQ ${mcqInjectResult.verdict}: ${problem.title}`);
-              await snapshotPage(page, 'mcq-fail', `${problem.title} :: ${mcqInjectResult.verdict}`);
+
+              // Only a confirmed wrong answer earns another try; a timeout / unknown verdict must not keep clicking blindly.
+              if (!confirmedWrong || mcqTry === MAX_MCQ_TRIES) {
+                metrics.problemsFailed += 1;
+                classAllPassed = false;
+                log.push({ title: problem.title, result: 'fail' });
+                await snapshotPage(page, 'mcq-fail', `${problem.title} :: ${mcqInjectResult.verdict}`);
+                mcqFinished = true;
+              }
             }
             continue;
           }

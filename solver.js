@@ -17,6 +17,7 @@ if (GROK_API_KEY && GROK_API_KEY.startsWith('gsk_')) {
 }
 const GROK_MODEL = (process.env.GROK_MODEL || '').trim();
 const GROQ_API_KEY = (process.env.GROQ_API_KEY || '').trim();
+const GROQ_CHAT_URL = (process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1/chat/completions').trim(); // overridable so tests can use a local fake
 const GROQ_MODEL = (process.env.GROQ_MODEL || 'llama-3.3-70b-versatile').trim();
 const GROQ_MODELS = ((process.env.GROQ_MODELS || '').trim() || 'llama-3.3-70b-versatile,qwen/qwen3-32b')
   .split(',')
@@ -483,7 +484,7 @@ async function generateWithGroq(promptText, modelName = GROQ_MODEL, maxTokens = 
   }
   let res;
   try {
-    res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    res = await fetch(GROQ_CHAT_URL, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${GROQ_API_KEY}`,

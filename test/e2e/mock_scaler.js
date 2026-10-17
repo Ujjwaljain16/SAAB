@@ -2,21 +2,32 @@
 // answered from here and everything else is blocked, so nothing ever reaches the real site.
 //
 // Problems on the mock class (all MCQ):
-//   1  table says SOLVED                                  -> must never even be opened
-//   2  genuinely unsolved                                 -> the ONLY one that may be solved/submitted
+//   1  table says SOLVED                                     -> must never even be opened
+//   2  genuinely unsolved (seeded answer is right)           -> solved on the first try
 //   3  table says Unsolved, but the problem PAGE says Solved -> must be opened, noticed and left alone
-//   5  table says Unsolved, but the DOCK says solved      -> must never be opened (table/dock disagreement)
+//   5  table says Unsolved, but the DOCK says solved         -> must never be opened (table/dock disagreement)
+//   6  right answer is option 2 -> needs 3 tries (0, 1 wrong; 2 right)
+//   7  right answer is option 1 -> needs 2 tries (0 wrong; 1 right)
+//   8  right answer is option 3 -> never reached in 3 tries (0, 1, 2 wrong): must be given up on, and left alone on re-runs
+// A wrong answer leaves the page "Attempted" and lowers the "N Attempts left" chip, like the real page does.
 // Plus the junk links Scaler really renders per row (/submissions, /help-requests).
 import fs from 'node:fs';
 
 const BASE = '/academy/mentee-dashboard/class/100/assignment/problems';
+const START_ATTEMPTS = 3;
 
 export const PROBLEMS = {
   1: { title: 'Q1. Already solved in table', tableStatus: 'Solved', score: '50.0/50', pageSolved: true },
-  2: { title: 'Q2. Genuinely unsolved', tableStatus: 'Unsolved', score: '0/50', pageSolved: false },
+  2: { title: 'Q2. Genuinely unsolved', tableStatus: 'Unsolved', score: '0/50', pageSolved: false, correct: 1 },
   3: { title: 'Q3. Solved but table is stale', tableStatus: 'Unsolved', score: '0/50', pageSolved: true },
-  5: { title: 'Q5. Solved per dock only', tableStatus: 'Unsolved', score: '0/50', pageSolved: false, dockSolved: true }
+  5: { title: 'Q5. Solved per dock only', tableStatus: 'Unsolved', score: '0/50', pageSolved: false, dockSolved: true },
+  6: { title: 'Q6. Needs three tries', tableStatus: 'Unsolved', score: '0/50', pageSolved: false, correct: 2 },
+  7: { title: 'Q7. Needs two tries', tableStatus: 'Unsolved', score: '0/50', pageSolved: false, correct: 1 },
+  8: { title: 'Q8. Never gets solved', tableStatus: 'Unsolved', score: '0/50', pageSolved: false, correct: 3 }
 };
+
+// Server-side state of this mock process: id -> { attempts, solved }
+const state = {};
 
 const page = (body, title = 'Mock') => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${body}</body></html>`;
 
@@ -32,7 +43,7 @@ function classesHtml() {
   const origin = 'https://www.scaler.com/academy/mentee-dashboard/class';
   return page(`
     <div><a class="me-cr-classroom-url t" data-cy="classroom-link" href="${origin}/100">Mock Class A</a>
-         <a class="me-cr-classroom-url p" data-cy="classroom-link" href="${origin}/100/assignment">1 / 4</a>
+         <a class="me-cr-classroom-url p" data-cy="classroom-link" href="${origin}/100/assignment">1 / 7</a>
          <a class="me-cr-classroom-url" data-cy="classroom-link" href="${origin}/100"></a></div>
     <div><a class="me-cr-classroom-url t" data-cy="classroom-link" href="${origin}/101">Mock Lab 1</a>
          <a class="me-cr-classroom-url" data-cy="classroom-link" href="${origin}/101"></a></div>
@@ -56,22 +67,35 @@ function tableHtml() {
   return page(`${dock}<table><tr class="table__row"><th>Name</th><th>Status</th></tr>${rows}</table>`);
 }
 
-export function problemHtml(id) {
+const TAG = {
+  solved: '<span class="status-tag-2 status-tag-2--success status-tag-2--small">Solved</span>',
+  attempted: '<span class="status-tag-2 status-tag-2--warning status-tag-2--small">Attempted</span>',
+  unsolved: '<span class="status-tag-2 status-tag-2--attention status-tag-2--small">Unsolved</span>'
+};
+
+export function problemHtml(id, st = state[id] || {}) {
   const p = PROBLEMS[id];
-  const tag = p.pageSolved
-    ? '<span class="status-tag-2 status-tag-2--success">Solved</span>'
-    : '<span class="status-tag-2">Unsolved</span>';
+  const solved = p.pageSolved || st.solved;
+  const attempts = st.attempts || 0;
+  const tag = solved ? TAG.solved : attempts > 0 ? TAG.attempted : TAG.unsolved;
   return page(`
-    <div class="cr-p-heading" id="heading">${p.title} <span class="status-tag-2 status-tag-2--warning">Mandatory</span> <span id="state">${tag}</span></div>
+    <div class="cr-p-heading" id="heading">${p.title} <span class="status-tag-2 status-tag-2--warning status-tag-2--default">Mandatory</span> <span id="state">${tag}</span></div>
     <div class="cr-p-statement">Which statement about question ${id} is correct? Choose exactly one option.</div>
-    ${['Alpha option', 'Beta option', 'Gamma option', 'Delta option'].map((t, i) =>
-      `<div class="cr-multiple-choice"><label class="cr-multiple-choice__label"><input type="radio" name="o" value="${i}"> ${t}</label></div>`).join('')}
-    <button class="cr-multiple-choice-container__submit" id="submit" disabled>Submit</button>
+    <div class="cr-multiple-choice-container">
+      <div class="cr-multiple-choice-container__heading">Choose the correct answer from below : <span class="cr-multiple-choice-container__hint-chip" id="chip">${START_ATTEMPTS - attempts} Attempts left</span></div>
+      ${['Alpha option', 'Beta option', 'Gamma option', 'Delta option'].map((t, i) =>
+        `<div class="cr-multiple-choice"><label class="cr-multiple-choice__radio"><input type="radio" name="o" value="${i}"><span class="cr-multiple-choice__label">${t}</span></label></div>`).join('')}
+      <button class="tappable disabled ce-btn btn btn-primary cr-judge-action cr-judge-action--submit cr-multiple-choice-container__submit" id="submit">Submit</button>
+    </div>
     <script>
-      document.querySelectorAll('input[name=o]').forEach((el) => el.addEventListener('change', () => { document.getElementById('submit').disabled = false; }));
-      document.getElementById('submit').addEventListener('click', () => {
-        fetch('/__submit/${id}', { method: 'POST' });
-        document.getElementById('state').innerHTML = '<span class="status-tag-2 status-tag-2--success">Solved</span>';
+      const TAGS = ${JSON.stringify(TAG)};
+      document.querySelectorAll('input[name=o]').forEach((el) => el.addEventListener('change', () => { document.getElementById('submit').classList.remove('disabled'); }));
+      document.getElementById('submit').addEventListener('click', async () => {
+        const chosen = document.querySelector('input[name=o]:checked')?.value;
+        const res = await fetch('/__submit/${id}?choice=' + chosen, { method: 'POST' });
+        const { correct, attemptsLeft } = await res.json();
+        document.getElementById('state').innerHTML = correct ? TAGS.solved : TAGS.attempted;
+        document.getElementById('chip').textContent = attemptsLeft + ' Attempts left';
       });
     </script>`, `${p.title} - Problem`);
 }
@@ -91,7 +115,16 @@ export async function setup(ctx) {
     if (p === BASE) return send(tableHtml());
 
     const submit = p.match(/^\/__submit\/(\d+)$/);
-    if (submit) { log(`submit ${submit[1]}`); return route.fulfill({ status: 200, body: 'ok' }); }
+    if (submit) {
+      const id = submit[1];
+      const choice = Number(url.searchParams.get('choice'));
+      const st = (state[id] = state[id] || { attempts: 0, solved: false });
+      const correct = !st.solved && choice === PROBLEMS[id]?.correct;
+      if (correct) st.solved = true; else st.attempts += 1;
+      log(`submit ${id}`);
+      log(`choice ${id} ${choice}`);
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ correct, attemptsLeft: Math.max(0, START_ATTEMPTS - st.attempts) }) });
+    }
 
     const prob = p.match(new RegExp(`^${BASE}/(\\d+)$`));
     if (prob && PROBLEMS[prob[1]]) { log(`visit ${prob[1]}`); return send(problemHtml(prob[1])); }
