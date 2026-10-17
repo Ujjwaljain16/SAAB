@@ -125,102 +125,117 @@ export async function readMcqState(page) {
     return { solved: state === 'solved', attempted: state === 'attempted', ...rest };
 }
 
+const SUBMIT_SEL = 'button.cr-multiple-choice-container__submit, button.cr-judge-action--submit';
+
+/** true / false when the option's radio or checkbox says so; null when the markup has no input to ask. */
+async function optionSelected(page, idx) {
+    return page.evaluate((i) => {
+        const input = document.querySelectorAll('.cr-multiple-choice')[i]?.querySelector('input[type="radio"], input[type="checkbox"]');
+        return input ? input.checked : null;
+    }, idx).catch(() => null);
+}
+
+/** What changed since `before` says how the submission went. Never read a badge that was already there. */
+function judgeMcqChange(before, now) {
+    if (now.solved || now.green) return { status: 'pass', verdict: 'Correct' };
+    const attemptsDropped = now.attemptsLeft != null && before.attemptsLeft != null && now.attemptsLeft < before.attemptsLeft;
+    const becameAttempted = now.attempted && !before.attempted;
+    if (now.danger || attemptsDropped || becameAttempted) return { status: 'fail', verdict: 'Incorrect' };
+    return null;
+}
+
 /**
  * Inject and submit an MCQ answer.
+ * Returned `verdict` is 'Correct', 'Incorrect' (a confirmed wrong answer), or a reason nothing was confirmed: in that last case
+ * `unconfirmed` is true and the caller must NOT treat the option as wrong.
  * @param {import('playwright').Page} page
  * @param {number} bestOptionIndex - 0-based index of the correct option
+ * @param {{ verdictTimeoutMs?: number, timeScale?: number }} [opts]
  */
-export async function injectMCQAnswer(page, bestOptionIndex) {
+export async function injectMCQAnswer(page, bestOptionIndex, opts = {}) {
+    const T = (ms) => Math.round(ms * (opts.timeScale ?? 1));
     try {
         // 1. Purge the floating SolveBot widget from DOM so it cannot intercept clicks
         await purgeBotWidgets(page);
 
-        // 2. Click the exact option
-        const clicked = await page.evaluate((idx) => {
-            const choices = document.querySelectorAll('.cr-multiple-choice');
-            if (choices[idx]) {
-                const label = choices[idx].querySelector('label, .cr-multiple-choice__radio') || choices[idx];
-                label.click();
-                return true;
-            }
-            return false;
-        }, bestOptionIndex).catch(() => false);
-
-        if (!clicked) {
-            const labelLoc = page.locator('.cr-multiple-choice label, .cr-multiple-choice').nth(bestOptionIndex);
-            await labelLoc.click({ force: true, timeout: 5000 }).catch(() => {});
+        // 2. A question with no attempts left cannot be answered: clicking Submit does nothing and would only time out.
+        const initial = await readMcqState(page);
+        if (!initial.solved && initial.attemptsLeft === 0) {
+            return { status: 'fail', verdict: 'No attempts left on this question', unconfirmed: true, exhausted: true };
         }
 
-        // 3. Ensure submit button is enabled (re-click option if needed)
-        let isEnabled = false;
-        for (let retry = 0; retry < 4; retry++) {
-            isEnabled = await page.waitForFunction(() => {
-                const btn = document.querySelector(
-                    'button.cr-multiple-choice-container__submit, button.cr-judge-action--submit'
-                );
-                return btn && !btn.classList.contains('disabled') && !btn.disabled;
-            }, { timeout: 3500 }).then(() => true).catch(() => false);
+        // 3. Select the option with a real click (React ignores some synthetic ones) and confirm it took, re-clicking only while it has not.
+        const option = page.locator('.cr-multiple-choice').nth(bestOptionIndex);
+        const selectOption = async () => {
+            await option.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+            // The container is wider than its radio: click the label (or radio) itself, which is what a person's click lands on.
+            const target = option.locator('label, .cr-multiple-choice__radio').first();
+            const clickTarget = (await target.count()) > 0 ? target : option;
+            const real = await clickTarget.click({ timeout: 3000 }).then(() => true).catch(() => false);
+            if (!real) {
+                await page.evaluate((idx) => {
+                    const choice = document.querySelectorAll('.cr-multiple-choice')[idx];
+                    (choice?.querySelector('label, .cr-multiple-choice__radio') || choice)?.click();
+                }, bestOptionIndex).catch(() => {});
+            }
+        };
+        const submitEnabled = () => page.waitForFunction((sel) => {
+            const btn = document.querySelector(sel);
+            return btn && !btn.classList.contains('disabled') && !btn.disabled;
+        }, SUBMIT_SEL, { timeout: Math.max(1, T(3500)) }).then(() => true).catch(() => false);
 
-            if (isEnabled) break;
-
-            // Re-click option if button stayed disabled
-            await page.evaluate((idx) => {
-                const choices = document.querySelectorAll('.cr-multiple-choice');
-                if (choices[idx]) {
-                    const label = choices[idx].querySelector('label, .cr-multiple-choice__radio') || choices[idx];
-                    label.click();
-                }
-            }, bestOptionIndex).catch(() => {});
-            await page.waitForTimeout(600);
+        let enabled = false;
+        for (let retry = 0; retry < 4 && !enabled; retry++) {
+            if ((await optionSelected(page, bestOptionIndex)) !== true) await selectOption();
+            enabled = await submitEnabled();
+        }
+        if ((await optionSelected(page, bestOptionIndex)) === false) {
+            return { status: 'fail', verdict: 'Option click did not register (nothing submitted)', unconfirmed: true };
         }
 
         const before = await readMcqState(page);
 
-        // 4. Click Submit — use evaluate to force-remove disabled class if needed
-        await page.evaluate(() => {
-            const btn = document.querySelector(
-                'button.cr-multiple-choice-container__submit, button.cr-judge-action--submit'
-            ) || Array.from(document.querySelectorAll('button')).find(b =>
-                (b.innerText || '').trim().match(/^submit$/i)
-            );
-            if (btn) {
-                btn.classList.remove('disabled');
-                btn.removeAttribute('disabled');
-                btn.click();
-            }
-        }).catch(() => {});
+        // 4. Submit: a real click when the button is enabled, a forced one only as the last resort.
+        const submitBtn = page.locator(SUBMIT_SEL).first();
+        const realSubmit = enabled && (await submitBtn.click({ timeout: 4000 }).then(() => true).catch(() => false));
+        if (!realSubmit) {
+            await page.evaluate((sel) => {
+                const btn = document.querySelector(sel) || Array.from(document.querySelectorAll('button')).find((b) => /^submit$/i.test((b.innerText || '').trim()));
+                if (btn) {
+                    btn.classList.remove('disabled');
+                    btn.removeAttribute('disabled');
+                    btn.click();
+                }
+            }, SUBMIT_SEL).catch(() => {});
+        }
 
-        await page.waitForTimeout(1200);
+        await page.waitForTimeout(T(1200));
 
         // 5. Handle Proceed confirmation modal
         const proceedBtn = page.locator('a:has-text("Proceed"), button:has-text("Proceed")').first();
-        if (await proceedBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        if (await proceedBtn.isVisible({ timeout: Math.max(1, T(2000)) }).catch(() => false)) {
             await proceedBtn.click({ force: true }).catch(() => {});
-            await page.waitForTimeout(800);
+            await page.waitForTimeout(T(800));
         }
 
-        // 6. Poll for a verdict. The verdict is decided by what CHANGED since before the click, never by a badge that was already
-        // there: after a wrong first try (or on a question that was already "Attempted") the Attempted badge is on the page from the
-        // start, so reading it as "wrong answer" would report a verdict before the new submission was even judged.
-        const start = Date.now();
-        while (Date.now() - start < 10000) {
-            const now = await readMcqState(page);
-
-            if (now.solved || now.green) {
-                return { status: 'pass', verdict: 'Correct' };
-            }
-
-            const attemptsDropped = now.attemptsLeft != null && before.attemptsLeft != null && now.attemptsLeft < before.attemptsLeft;
-            const becameAttempted = now.attempted && !before.attempted;
-            if (now.danger || attemptsDropped || becameAttempted) {
-                return { status: 'fail', verdict: 'Incorrect' };
-            }
-
-            await page.waitForTimeout(300);
+        // 6. Poll for a verdict (see judgeMcqChange). Under load (4 pages at once) Scaler can take well over 10 s to answer.
+        const deadline = Date.now() + (opts.verdictTimeoutMs ?? 20000);
+        while (Date.now() < deadline) {
+            const verdict = judgeMcqChange(before, await readMcqState(page));
+            if (verdict) return verdict;
+            await page.waitForTimeout(T(300));
         }
 
-        return { status: 'fail', verdict: 'Submit timeout (no verdict detected)' };
+        // 7. Nothing repainted. The submission may still have been judged (the counter or the Solved tag only updates on load), so
+        // reload and compare once more before giving up.
+        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+        await page.waitForSelector('.status-tag-2, .cr-multiple-choice-container__hint-chip', { timeout: Math.max(1, T(15000)) }).catch(() => {});
+        await page.waitForTimeout(T(800));
+        const afterReload = judgeMcqChange(before, await readMcqState(page));
+        if (afterReload) return afterReload;
+
+        return { status: 'fail', verdict: 'Submit timeout (no verdict detected)', unconfirmed: true };
     } catch (err) {
-        return { status: 'fail', verdict: `Injection error: ${err.message}` };
+        return { status: 'fail', verdict: `Injection error: ${err.message}`, unconfirmed: true };
     }
 }
