@@ -16,7 +16,7 @@ import { makeRunState, markClassComplete, markProblemComplete } from './run_stat
 import {
   previewCode, classifyFailureFeedback, resolveTargetLanguage, selectProblemLanguage,
   getCurrentSelectedLanguageLabel, extractProblemContent, extractTestCases, extractEditorStarterCode,
-  collectAssignmentProblems, collectQuestionTabs, getProblemSolveState, buildProblemsUrl, isLoginUrl, detectProblemType, isProblemHref
+  collectAssignmentProblems, collectQuestionTabs, mergeProblems, isSolvedNow, buildProblemsUrl, isLoginUrl, detectProblemType
 } from './scaler_page.js';
 import { pathToFileURL } from 'url';
 import { normalizeScalerUrl, canonicalProblemUrl } from './scaler_url.js';
@@ -307,20 +307,11 @@ async function run() {
 
         const tableProblems = await collectAssignmentProblems(mainPage);
         const questionTabs = await collectQuestionTabs(mainPage);
-        const problemMap = new Map();
-        for (const p of [...tableProblems, ...questionTabs]) {
-          if (p?.solveUrl && isProblemHref(p.solveUrl)) {
-            const canon = canonicalProblemUrl(p.solveUrl);
-            if (canon && !problemMap.has(canon)) {
-              p.solveUrl = canon;
-              if (p.isSolved) {
-                runState.completedProblems.add(canon);
-              }
-              problemMap.set(canon, p);
-            }
-          }
+        // Only real question links; if the table OR the dock says a problem is solved, it is solved and never touched.
+        const problems = mergeProblems(tableProblems, questionTabs);
+        for (const p of problems) {
+          if (p.isSolved) runState.completedProblems.add(p.solveUrl);
         }
-        const problems = Array.from(problemMap.values());
 
         if (problems.length === 0) {
           console.log('No assignment problems found on this page.');
@@ -393,8 +384,7 @@ async function run() {
           await safeGoto(page, normalizeScalerUrl(solveUrl));
           await ensureLoggedIn(page, ctx, `worker ${workerId} problem page`);
 
-          const solveState = await getProblemSolveState(page);
-          if (solveState === 'solved') {
+          if (await isSolvedNow(page, { wait: true })) {
             console.log(`  [Worker ${workerId}] Already solved on Scaler: ${problem.title}`);
             log.push({ title: problem.title, result: 'skipped' });
             markProblemComplete(runState, solveUrl);
@@ -435,6 +425,13 @@ async function run() {
             const release = await workspaceMutex.acquire();
             try {
               console.log(`  [Worker ${workerId}] Executing Maxwell container lab: ${problem.title}...`);
+              // Waiting for the shared lab slot can take minutes: re-check before touching a container.
+              if (await isSolvedNow(page)) {
+                console.log(`  [Worker ${workerId}] Already solved (found while waiting for the lab slot): ${problem.title}`);
+                log.push({ title: problem.title, result: 'skipped' });
+                markProblemComplete(runState, solveUrl);
+                continue;
+              }
               if (DRY_RUN) {
                 metrics.problemsDryRun += 1;
                 log.push({ title: problem.title, result: 'dry-run' });
@@ -487,6 +484,12 @@ async function run() {
             const release = await workspaceMutex.acquire();
             try {
               console.log(`  [Worker ${workerId}] Solving VS Code IDE problem: ${problem.title}...`);
+              if (await isSolvedNow(page)) {
+                console.log(`  [Worker ${workerId}] Already solved (found while waiting for the IDE slot): ${problem.title}`);
+                log.push({ title: problem.title, result: 'skipped' });
+                markProblemComplete(runState, solveUrl);
+                continue;
+              }
               metrics.solveAttempts += 1;
 
               // Open the IDE if it hasn't loaded yet
@@ -516,6 +519,12 @@ async function run() {
                 continue;
               }
 
+              if (await isSolvedNow(page)) {
+                console.log(`  [Worker ${workerId}] Became solved while the AI was working; not submitting: ${problem.title}`);
+                log.push({ title: problem.title, result: 'skipped' });
+                markProblemComplete(runState, solveUrl);
+                continue;
+              }
               await injectWorkspaceContext(page, wsResult.fileMap);
               metrics.submitAttempts += 1;
 
@@ -584,6 +593,14 @@ async function run() {
               continue;
             }
 
+            // The AI call takes time; make sure the problem is still unsolved right before clicking anything.
+            if (await isSolvedNow(page)) {
+              console.log(`  [Worker ${workerId}] Became solved while the AI was working; not submitting: ${problem.title}`);
+              log.push({ title: problem.title, result: 'skipped' });
+              markProblemComplete(runState, solveUrl);
+              continue;
+            }
+
             metrics.submitAttempts += 1;
             const mcqInjectResult = await injectMCQAnswer(page, mcqResult.bestOptionIndex);
             log.push({ title: problem.title, result: mcqInjectResult.status });
@@ -613,9 +630,16 @@ async function run() {
 
           let result = 'fail';
           let failureFeedback = '';
+          let alreadySolved = false;
 
           for (let attempt = 1; attempt <= 3; attempt++) {
             if (globalHaltRun) break;
+
+            // A slow judge verdict (or another worker / the user) may already have solved it: never submit onto a solved problem.
+            if (attempt > 1 && (await isSolvedNow(page))) {
+              alreadySolved = true;
+              break;
+            }
 
             metrics.solveAttempts += 1;
             console.log(`  [Worker ${workerId}] Solving coding (attempt ${attempt}): ${problem.title}`);
@@ -663,6 +687,11 @@ async function run() {
               break;
             }
 
+            if (await isSolvedNow(page)) {
+              alreadySolved = true;
+              break;
+            }
+
             metrics.submitAttempts += 1;
             const submitResult = await injectAndSubmit(page, code);
             result = submitResult.status;
@@ -678,6 +707,14 @@ async function run() {
             failureFeedback = submitResult.feedback || submitResult.verdict || 'Submission failed.';
             console.log(`  [Worker ${workerId}] Attempt ${attempt} failed: ${failureFeedback.slice(0, 160)}...`);
             await DELAY(500);
+          }
+
+          if (alreadySolved) {
+            console.log(`  [Worker ${workerId}] Already solved on Scaler; stopped without submitting: ${problem.title}`);
+            log.push({ title: problem.title, result: 'skipped' });
+            metrics.problemsSkipped += 1;
+            markProblemComplete(runState, solveUrl);
+            continue;
           }
 
           if (!['pass', 'dry-run'].includes(result)) {
