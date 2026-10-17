@@ -262,3 +262,11 @@ Google applies limits **per project, not per API key**, so extra keys only add c
 - **Never an already-solved problem.** If the problems table, the question dock or the problem page says *Solved* (status tag only, never free text in the title), it is skipped; the state is re-checked right before every AI call and every submit.
 - **MCQs:** up to **3 tries** (`MCQ_MAX_TRIES`). Every wrong answer is remembered and excluded from the next try; after that the question is left alone, including on later runs. A verdict is read from what *changed* after the click (Solved, or the attempts counter dropping), never from a badge that was already there.
 - **Labs:** if Scaler warns that running again would reset completed tasks, SAAB cancels and stops instead of confirming.
+
+### Model pool (recommended)
+
+On the free tier the daily quota is **per model**. The default model used to be `gemini-2.5-flash` (20 requests/day) which a single class can exhaust.
+Set `GEMINI_MODELS=gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-2.5-flash` to get ~1000 requests/day per key: the first model is used while it has
+capacity (15/min, 500/day), then the next one takes over, and the daily/per-minute budgets of every (model, key) pair are tracked separately and remembered
+across runs. Image questions only go to vision-capable (Gemini) models, and Gemma models are never sent JSON mode (they reject it).
+`GEMINI_LIMITS=model=rpm/rpd,...` teaches SAAB the limits of a model it does not know.
