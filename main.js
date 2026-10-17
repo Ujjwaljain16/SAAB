@@ -171,10 +171,11 @@ async function safeGoto(page, url, options = {}) {
       ...options
     };
     try {
-      if (page.url() === url) {
-        return;
+      const response = await page.goto(url, opts);
+      if (opts.waitUntil === 'commit') {
+        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
       }
-      return await page.goto(url, opts);
+      return response;
     } catch (err) {
       const isAbort = /ERR_ABORTED|net::ERR_|aborted/i.test(err.message || '');
       const isTimeout = err.name === 'TimeoutError' || /timeout/i.test(err.message || '');
@@ -386,6 +387,7 @@ async function run() {
       console.log(`Pending problems to solve: ${pendingProblems.length}/${problems.length}`);
 
       // Spawn Page Pool
+      const requeuedProblems = new Set();
       const poolSize = Math.min(SOLVE_CONCURRENCY, pendingProblems.length);
       const workerPages = [];
       workerPages.push(mainPage); // Main page serves as worker 0
@@ -461,12 +463,19 @@ async function run() {
 
           const targetLanguage = resolveTargetLanguage(subject);
           let type = await detectProblemType(page);
-          if (type === 'unknown') {
-            // Nothing recognisable has rendered (a slow page). Reload once and look again; never guess a problem type.
-            console.log(`  [Worker ${workerId}] Page not recognised yet; reloading once: ${problem.title}`);
+          for (let reloadN = 1; type === 'unknown' && reloadN <= 2; reloadN++) {
+            // Nothing recognisable has rendered (a slow page). Reload and look again; never guess a problem type.
+            console.log(`  [Worker ${workerId}] Page not recognised yet; reloading (${reloadN}/2): ${problem.title}`);
             await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
             await ensureLoggedIn(page, ctx, `worker ${workerId} reload`);
             type = await detectProblemType(page);
+          }
+          if (type === 'unknown' && !requeuedProblems.has(solveUrl)) {
+            // Usually a slow network, not a broken page: try it again after the rest of the queue, when the connection is less busy.
+            requeuedProblems.add(solveUrl);
+            pendingProblems.push(problem);
+            console.log(`  [Worker ${workerId}] ↻ Page still not recognised; will retry it at the end of the queue: ${problem.title}`);
+            continue;
           }
           if (type === 'unknown') {
             console.log(`  [Worker ${workerId}] ✗ Could not recognise the problem type; skipping (no AI calls made): ${problem.title}`);
@@ -695,6 +704,13 @@ async function run() {
                 break;
               }
 
+              if (problemContent.attemptsLeft === 0) {
+                console.log(`  [Worker ${workerId}] No attempts left on this question; nothing to do (no AI call made): ${problem.title}`);
+                log.push({ title: problem.title, result: 'skipped' });
+                classAllPassed = false;
+                break;
+              }
+
               const attemptsNote = problemContent.attemptsLeft == null ? '' : `, ${problemContent.attemptsLeft} attempt(s) left on page`;
               console.log(`  [Worker ${workerId}] Solving MCQ (try ${mcqTry}/${MAX_MCQ_TRIES}${attemptsNote}): ${problem.title}`);
               const mcqResult = await solveMCQ(problemContent);
@@ -740,6 +756,13 @@ async function run() {
 
               evictSolution(mcqResult.cacheKey);
               console.log(`  [Worker ${workerId}] ✗ MCQ ${mcqInjectResult.verdict} (try ${mcqTry}/${MAX_MCQ_TRIES}): ${problem.title}`);
+
+              if (mcqInjectResult.exhausted) {
+                log.push({ title: problem.title, result: 'skipped' });
+                classAllPassed = false;
+                mcqFinished = true;
+                break;
+              }
 
               const confirmedWrong = mcqInjectResult.verdict === 'Incorrect';
               if (confirmedWrong) {
