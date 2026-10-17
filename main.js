@@ -354,10 +354,17 @@ async function run() {
         // The question dock renders before the problems table. Reading too early gave dock-only data (titles like "Q 1") and lost
         // the table's solved flags, so wait for the table itself (short, because some layouts only have the dock).
         await mainPage.waitForSelector('tr.table__row a.me-cr-problem-list__name, tr.table__row a.me-cr-problem-actions__btn', { timeout: 6000 }).catch(() => {});
-        const tableProblems = await collectAssignmentProblems(mainPage);
-        const questionTabs = await collectQuestionTabs(mainPage);
         // Only real question links; if the table OR the dock says a problem is solved, it is solved and never touched.
-        const problems = mergeProblems(tableProblems, questionTabs);
+        const readProblems = async () => mergeProblems(await collectAssignmentProblems(mainPage), await collectQuestionTabs(mainPage));
+        let problems = await readProblems();
+        for (let reloadN = 1; problems.length === 0 && reloadN <= 2; reloadN++) {
+          // An empty list is almost always a slow page, not a class without questions (seen live after navigation timeouts).
+          console.log(`  No problems rendered yet (slow page?); reloading (${reloadN}/2)...`);
+          await mainPage.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+          await ensureLoggedIn(mainPage, ctx, 'assignment problems reload');
+          await mainPage.waitForSelector('tr.table__row a.me-cr-problem-list__name, a.cr-p-navigation-dock-item[href*="/assignment/problems/"]', { timeout: 25000 }).catch(() => {});
+          problems = await readProblems();
+        }
         for (const p of problems) {
           if (p.isSolved && !E2E_CLASS) runState.completedProblems.add(p.solveUrl);
         }
