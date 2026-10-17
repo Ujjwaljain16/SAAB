@@ -287,13 +287,11 @@ export async function getProblemSolveState(page, { wait = true } = {}) {
     // Look at every status tag, not just the first: a "Mandatory" tag usually comes before the Solved/Unsolved one.
     const tags = Array.from(document.querySelectorAll('.cr-p-heading [class*="status"], [class*="status-tag"]'));
     const texts = tags.map((t) => (t.textContent || '').trim().toLowerCase());
-    const heading = (document.querySelector('.cr-p-heading')?.innerText || '').toLowerCase();
 
     if (texts.some((t) => t.includes('unsolved'))) return 'unsolved';
     const solved =
       texts.some((t) => /\bsolved\b/.test(t)) ||
       tags.some((t) => /status-tag(-2)?--success/.test(String(t.className))) ||
-      /\bsolved\b/.test(heading) ||
       document.querySelector('.cr-p-heading .cr-icon-correct') != null;
     if (solved) return 'solved';
     if (texts.some((t) => t.includes('attempted'))) return 'attempted';

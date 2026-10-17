@@ -122,10 +122,20 @@ test('isSolvedNow catches a status badge that renders late (React) and a problem
   await unsolved.close();
 });
 
-test('getProblemSolveState also recognises solved from the heading text or a correct-icon', async () => {
-  const byText = await pageWith('<div class="cr-p-heading">Q1. Purpose of Docker Solved</div>');
-  assert.equal(await getProblemSolveState(byText, { wait: false }), 'solved');
-  await byText.close();
+test('getProblemSolveState reads the status TAGS only: a question title containing "solved" is not a solved question', async () => {
+  // Regression: a question called "Never gets solved" was read as solved the moment its tag became Attempted, so a wrong answer
+  // was cached as correct. Free heading text must never count.
+  const titled = await pageWith('<div class="cr-p-heading">Q8. Never gets solved <span class="status-tag-2">Attempted</span></div>');
+  assert.equal(await getProblemSolveState(titled, { wait: false }), 'attempted');
+  await titled.close();
+
+  const titledUnsolved = await pageWith('<div class="cr-p-heading">Q9. Solved examples <span class="status-tag-2">Unsolved</span></div>');
+  assert.equal(await getProblemSolveState(titledUnsolved, { wait: false }), 'unsolved');
+  await titledUnsolved.close();
+
+  const textOnly = await pageWith('<div class="cr-p-heading">Q1. Purpose of Docker Solved</div>');
+  assert.equal(await getProblemSolveState(textOnly, { wait: false }), 'unsolved', 'no status tag, so heading words are ignored');
+  await textOnly.close();
 
   const byIcon = await pageWith('<div class="cr-p-heading">Q2 <i class="cr-icon-correct"></i></div>');
   assert.equal(await getProblemSolveState(byIcon, { wait: false }), 'solved');
