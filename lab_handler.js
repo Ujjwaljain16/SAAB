@@ -1,5 +1,5 @@
 import { solveTerminalLab, commitSolution, evictSolution } from './solver.js';
-import { sanitizeLabCommands } from './lab_guard.js';
+import { sanitizeLabCommands, extractSudoPassword, sudoPrimeCommand } from './lab_guard.js';
 import { SEL } from './config.js';
 import { purgeBotWidgets } from './page_utils.js';
 import { getProblemSolveState } from './scaler_page.js';
@@ -134,7 +134,11 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
             // Everything typed so far, in order: replaying it on a fresh container is what a cached solution has to do.
             trace.solution = { commands: ranCommands.slice(), reasoning: labResult.reasoning };
 
-            await typeCommands(page, maxwellFrame, commands, T);
+            // Labs that say "Use password X if required for sudo access": the model is never trusted with the password. It is read from
+            // the statement here, used to cache the sudo credential up front, and used again if a sudo prompt still shows up.
+            const sudoPassword = extractSudoPassword(problemStatement);
+            const needsSudo = sudoPassword && commands.some((c) => /\bsudo\b/.test(c));
+            await typeCommands(page, maxwellFrame, commands, T, needsSudo ? { sudoPassword } : {});
             await page.waitForTimeout(T(2500));
 
             console.log('[Lab Solver] Submitting and waiting for the judge...');
@@ -153,11 +157,19 @@ async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
 }
 
 /** Focus the xterm inside the Maxwell iframe and type each command, pausing longer for slow ones. */
-async function typeCommands(page, maxwellFrame, commands, T) {
+async function typeCommands(page, maxwellFrame, commands, T, { sudoPassword = '' } = {}) {
     console.log('[Lab Solver] Focusing Maxwell terminal...');
     const terminal = maxwellFrame.locator('.xterm, textarea.xterm-helper-textarea, canvas.xterm-text-layer').first();
     await terminal.click({ force: true }).catch(() => {});
     await page.waitForTimeout(T(800));
+
+    if (sudoPassword) {
+        console.log('  > (caching the sudo credential with the password given in the problem)');
+        await maxwellFrame.locator('textarea.xterm-helper-textarea').first().focus().catch(() => {});
+        await page.keyboard.type(sudoPrimeCommand(sudoPassword), { delay: 30 });
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(T(1200));
+    }
 
     console.log(`[Lab Solver] Executing ${commands.length} bash commands...`);
     for (const cmd of commands) {
@@ -170,7 +182,26 @@ async function typeCommands(page, maxwellFrame, commands, T) {
         // Wait for the command to finish: 700ms per command, longer for installs and the like.
         const isSlowCmd = /apt|apt-get|yum|dnf|pip|npm|wget|curl|git clone|make|docker|systemctl/i.test(cmd);
         await page.waitForTimeout(T(isSlowCmd ? 3500 : 700));
+
+        // Safety net: if sudo still stopped at a password prompt (credential cache disabled, or a different user), answer it.
+        // Anything typed while a command waits for a password is swallowed by it, so this must come before the next command.
+        if (sudoPassword && /\bsudo\b/.test(cmd)) {
+            for (let i = 0; i < 3 && (await sudoPromptVisible(maxwellFrame)); i++) {
+                console.log('  > (sudo asked for a password; answering it)');
+                await page.keyboard.type(sudoPassword, { delay: 30 });
+                await page.keyboard.press('Enter');
+                await page.waitForTimeout(T(1000));
+            }
+        }
     }
+}
+
+/** True when the last visible lines of the xterm are a sudo password prompt (only readable with xterm's DOM renderer). */
+async function sudoPromptVisible(maxwellFrame) {
+    const text = await maxwellFrame
+        .evaluate(() => (document.querySelector('.xterm-rows')?.innerText || '').trimEnd().split('\n').slice(-2).join('\n'))
+        .catch(() => '');
+    return /\[sudo\] password for [^\n]*:\s*$|^password:\s*$/im.test(text);
 }
 
 /**

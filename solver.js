@@ -1296,6 +1296,7 @@ Rules:
 1. Provide the exact bash commands to run in the terminal to fulfill all requirements.
 2. File creation must be non-interactive (e.g. cat << 'EOF' > <the exact path from the problem> ... EOF).
 2b. Use ONLY the exact paths, file names, users and values stated in the problem. Never invent your own example files or directories, and do not run generic demonstration commands.
+2c. If the problem mentions a password for sudo, just write plain "sudo <command>". The terminal is prepared with that password already, so never put a password in a command and never use "sudo -S" or "su".
 3. If files need execution permissions, include chmod +x.
 4. If directories are needed, include mkdir -p.
 5. Return ONLY the JSON object. Do not include markdown or explanations outside the JSON.`;

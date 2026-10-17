@@ -38,3 +38,16 @@ test('rejects non-strings, blanks are ignored, and the command count is capped',
   assert.equal(rejected.length, 1 + 5);
   assert.deepEqual(sanitizeLabCommands(null), { commands: [], rejected: [] });
 });
+
+test('reads the sudo password a lab statement hands out, but only for sudo', async () => {
+  const { extractSudoPassword, sudoPrimeCommand } = await import('../lab_guard.js');
+  assert.equal(extractSudoPassword('Change the owner.\nUse password user@123! if required for sudo access'), 'user@123!');
+  assert.equal(extractSudoPassword('The sudo password is `s3cret` for this lab.'), 's3cret');
+  assert.equal(extractSudoPassword('Use sudo password: hunter2.'), 'hunter2');
+  assert.equal(extractSudoPassword('Create a database user with password abc123 for the app'), null, 'no sudo, no password');
+  assert.equal(extractSudoPassword('Run it with sudo.'), null);
+  assert.equal(extractSudoPassword(''), null);
+
+  assert.equal(sudoPrimeCommand('user@123!'), `echo 'user@123!' | sudo -S -p '' -v`);
+  assert.equal(sudoPrimeCommand("it's"), `echo 'it'\\''s' | sudo -S -p '' -v`, 'a quote in the password cannot break out of the command');
+});

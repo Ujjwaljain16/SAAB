@@ -278,3 +278,55 @@ test('the "Only 1 lab session is allowed" prompt is answered even when it appear
   assert.equal(await page.evaluate(() => window.__ended), true, 'End Previous Lab was clicked when it appeared');
   await page.close();
 });
+
+// ---- sudo: the lab statement hands out the password; the agent must use it ------------------------------------------------------------
+const SUDO_STATEMENT = 'Change the owner of /opt/app to user.\nUse password user@123! if required for sudo access';
+const SUDO_PRIME = `echo 'user@123!' | sudo -S -p '' -v`;
+
+test('a lab that gives a sudo password: the credential is cached first, with the password from the statement (not from the AI)', async () => {
+  seed('Lab sudo', SUDO_STATEMENT, ['sudo chown -R user /opt/app', 'ls -l /opt']);
+  const page = await realLabPage(`document.getElementById('tag').innerHTML = '<span class="status-tag-2 status-tag-2--success">Solved</span>';`);
+
+  const result = await solveAndSubmitLab(page, 'Lab sudo', SUDO_STATEMENT, FAST);
+
+  assert.equal(result.status, 'pass', JSON.stringify(result));
+  assert.equal(await typedInTerminal(page), `${SUDO_PRIME}\nsudo chown -R user /opt/app\nls -l /opt\n`);
+  await page.close();
+});
+
+test('no sudo in the commands: nothing about passwords is typed', async () => {
+  seed('Lab no sudo', SUDO_STATEMENT, ['touch /tmp/x']);
+  const page = await realLabPage(`document.getElementById('tag').innerHTML = '<span class="status-tag-2 status-tag-2--success">Solved</span>';`);
+
+  await solveAndSubmitLab(page, 'Lab no sudo', SUDO_STATEMENT, FAST);
+
+  assert.equal(await typedInTerminal(page), 'touch /tmp/x\n');
+  await page.close();
+});
+
+test('if sudo still stops at a [sudo] password prompt, it is answered before the next command is typed', async () => {
+  seed('Lab sudo prompt', SUDO_STATEMENT, ['sudo chown -R user /opt/app', 'ls -l /opt']);
+  const page = await browser.newPage();
+  await page.route('https://scaler.test/**', (r) => r.fulfill({ contentType: 'text/html', body: realLabHtml(`document.getElementById('tag').innerHTML = '<span class="status-tag-2 status-tag-2--success">Solved</span>';`) }));
+  // A terminal that behaves like a sudo with no credential cache: the real command (not the priming one) asks for a password.
+  await page.route('https://abc.maxwell.test/**', (r) => r.fulfill({ contentType: 'text/html', body: `<div class="xterm"><textarea class="xterm-helper-textarea"></textarea><div class="xterm-rows"><div id="row"></div></div></div>
+<script>
+  window.typed = []; let line = '';
+  document.querySelector('textarea').addEventListener('keydown', (e) => {
+    window.typed.push(e.key);
+    if (e.key.length === 1) { line += e.key; return; }
+    if (e.key === 'Enter') {
+      if (line.startsWith('sudo chown')) document.getElementById('row').textContent = '[sudo] password for user:';
+      else if (line === 'user@123!') document.getElementById('row').textContent = '';
+      line = '';
+    }
+  });
+</script>` }));
+  await page.goto('https://scaler.test/lab');
+
+  const result = await solveAndSubmitLab(page, 'Lab sudo prompt', SUDO_STATEMENT, FAST);
+
+  assert.equal(result.status, 'pass', JSON.stringify(result));
+  assert.equal(await typedInTerminal(page), `${SUDO_PRIME}\nsudo chown -R user /opt/app\nuser@123!\nls -l /opt\n`);
+  await page.close();
+});

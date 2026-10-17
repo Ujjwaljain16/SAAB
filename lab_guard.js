@@ -21,6 +21,27 @@ const BLOCKED_PATTERNS = [
 ];
 
 /**
+ * The sudo password a lab statement hands out, e.g. "Use password user@123! if required for sudo access". Only returned when the
+ * statement also mentions sudo, so an unrelated "password" in a task (a database user, say) is never typed into a sudo prompt.
+ * @param {string} statement
+ * @returns {string|null}
+ */
+export function extractSudoPassword(statement) {
+  const text = String(statement || '');
+  if (!/\bsudo\b/i.test(text)) return null;
+  const m =
+    text.match(/\bpassword\b\s*(?:is\s+|[:=]\s*)?[`"']?([^\s`"']{1,64})[`"']?\s+(?:if|for|when|to|as|in)\b/i) ||
+    text.match(/\bsudo\b[^\n.]{0,40}\bpassword\b\s*(?:is\s+|[:=]\s*)[`"']?([^\s`"']{1,64})[`"']?/i);
+  const pw = m?.[1]?.replace(/[.,;]+$/, '');
+  return pw || null;
+}
+
+/** Caches the sudo credential (default 15 min) so the plain `sudo ...` commands that follow never stop at a prompt. */
+export function sudoPrimeCommand(password) {
+  return `echo '${String(password).replace(/'/g, `'\\''`)}' | sudo -S -p '' -v`;
+}
+
+/**
  * Filter model-proposed lab commands.
  * @param {unknown} commands
  * @returns {{ commands: string[], rejected: { command: string, reason: string }[] }}
