@@ -16,31 +16,70 @@ export function stripMarkdownFences(text) {
 }
 
 /**
- * Robust JSON extractor that finds the largest bracket-balanced block.
+ * Robust JSON extractor that finds the first bracket-balanced { ... } block.
  */
 export function extractJsonBlock(text) {
   const raw = stripMarkdownFences(text);
   try {
     return JSON.parse(raw);
   } catch (e) {
-    // Fallback: try to find a { ... } block
+    // Find the first balanced { ... } block respecting string literals & escapes
     const start = raw.indexOf('{');
-    const end = raw.lastIndexOf('}');
-    if (start !== -1 && end !== -1 && end > start) {
-      const slice = raw.slice(start, end + 1);
-      try {
-        return JSON.parse(slice);
-      } catch (e2) {
-        // Last resort: remove common AI errors
-        const cleaned = slice
-          .replace(/\\n/g, ' ')
-          .replace(/\\"/g, '"')
-          // eslint-disable-next-line no-control-regex
-          .replace(/[\u0000-\u001F\u007F-\u009F]/g, "")
-          .trim();
-          try { return JSON.parse(cleaned); } catch(e3) { throw e; }
+    if (start !== -1) {
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+
+      for (let i = start; i < raw.length; i++) {
+        const ch = raw[i];
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\' && inString) {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (!inString) {
+          if (ch === '{') depth++;
+          else if (ch === '}') {
+            depth--;
+            if (depth === 0) {
+              const slice = raw.slice(start, i + 1);
+              try {
+                return JSON.parse(slice);
+              } catch (e2) {
+                // Clean any stray control characters
+                const cleaned = slice
+                  // eslint-disable-next-line no-control-regex
+                  .replace(/[\u0000-\u001F\u007F-\u009F]/g, (c) => (c === '\n' || c === '\r' || c === '\t' ? ' ' : ''))
+                  .trim();
+                try {
+                  return JSON.parse(cleaned);
+                } catch {
+                  break;
+                }
+              }
+            }
+          }
+        }
       }
     }
+
+    // Fallback: try lastIndexOf('}') if balanced search didn't parse
+    const lastStart = raw.indexOf('{');
+    const lastEnd = raw.lastIndexOf('}');
+    if (lastStart !== -1 && lastEnd > lastStart) {
+      const slice = raw.slice(lastStart, lastEnd + 1);
+      try {
+        return JSON.parse(slice);
+      } catch {}
+    }
+
     throw e;
   }
 }

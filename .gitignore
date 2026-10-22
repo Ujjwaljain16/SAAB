@@ -2,12 +2,15 @@ node_modules/
 .env
 session.json
 session.json.tmp
+session_bits.json
+session_bits.json.tmp
 *.tmp
 run-log.json
 bits-run-log.json
 run-state.json
 .solver-cache/
 temp_chrome_profile/
+temp_chrome_profile_bits/
 problem_dom.json
 dump_assignment_dom.js
 dump_problem_dom.js
@@ -21,3 +24,5 @@ data/
 runs/
 debug/
 .quota/
+bits-run-state.json
+answers/*.pdf

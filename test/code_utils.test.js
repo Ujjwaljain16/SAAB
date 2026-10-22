@@ -19,6 +19,10 @@ test('extractJsonBlock parses raw, fenced and chatty JSON', () => {
   assert.deepEqual(extractJsonBlock('{"a":1}'), { a: 1 });
   assert.deepEqual(extractJsonBlock('```json\n{"a":2}\n```'), { a: 2 });
   assert.deepEqual(extractJsonBlock('Sure! Here you go: {"a":3} hope it helps'), { a: 3 });
+  assert.deepEqual(extractJsonBlock('{\n  "bestOptionIndex": 1,\n  "reasoning": "Option B is \\"correct\\" because {x} is valid."\n}\nExtra trailing text with closing brace: } and note.'), {
+    bestOptionIndex: 1,
+    reasoning: 'Option B is "correct" because {x} is valid.'
+  });
   assert.throws(() => extractJsonBlock('no json here'));
 });
 

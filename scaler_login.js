@@ -203,20 +203,31 @@ function notifyOnce(progress, key, message) {
   console.log(message);
 }
 
-async function handleGoogleAuth(page, email, pass, maxMs) {
+export async function handleGoogleAuth(page, email, pass, maxMs, isDone = null) {
   const startTime = Date.now();
   let sawGoogle = false;
   const sessionNotice = { printed: false };
   const progress = { passwordSubmits: 0, passwordSubmittedAt: 0, emailSubmits: 0, chooserClicks: 0, notices: new Set() };
 
   while (Date.now() - startTime < maxMs) {
-    if (page.isClosed()) break;
+    if (page.isClosed()) {
+      if (sawGoogle) {
+        console.log('Google Auth completed: auth window closed.');
+        return;
+      }
+      break;
+    }
     const url = page.url();
     if (isGoogleUrl(url)) sawGoogle = true;
 
+    if (isDone && (await isDone(url, page))) {
+      console.log('Google Auth completed: returned to destination.');
+      return;
+    }
+
     // Done only when we are on a real Scaler page again: not a login page, and not mid-OAuth (/users/auth/..., callbacks).
     const onScalerPage = isScalerUrl(url) && !isLoginUrl(url) && !url.includes('/users/');
-    if (onScalerPage && (sawGoogle || url.includes('/mentee-dashboard'))) {
+    if (!isDone && onScalerPage && (sawGoogle || url.includes('/mentee-dashboard'))) {
       console.log('Google Auth completed: returned to Scaler.');
       return;
     }
