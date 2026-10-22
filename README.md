@@ -11,6 +11,8 @@
 
 | Problem Type | How |
 |---|---|
+| **BITS Pilani Coursera Quizzes** (Single & Multi-Select) | Autonomous ReAct Loop (Reason ➔ Act ➔ Observe ➔ Self-Correct), Universal AnswerStore (PDF/JSON/TXT/MD), Scramble-Proof Option Matcher, Pre-Submit Auditor, and Auto-Retake Loop |
+| **Mission Control Dashboard** | Local Dark Glassmorphism Web UI (`http://localhost:3000`), Drag-and-Drop Answer Key Ingestion, Real-Time SSE Log Streaming, and Live ReAct Inspector |
 | **Coding problems** (Java / JavaScript) | Gemini → Groq fallback, 3 retry attempts with compiler feedback loop, direct Monaco API injection |
 | **MCQ** (text + image-based) | Gemini Vision for image questions, disk cache so same question is never called twice |
 | **DevOps Terminal Labs** (Maxwell container) | AI generates exact bash commands, types them into the xterm terminal via iframe keyboard |
@@ -106,40 +108,142 @@ node main.js --refresh-curriculum
 
 ---
 
-## 🎓 BITS Pilani (Coursera BSc Computer Science)
+## 🚀 Mission Control Web Dashboard (Phase 2)
 
-SAAB now supports auto-solving assignments, exams, and quizzes across your **BITS Pilani BSc Computer Science** degree on Coursera!
+SAAB includes a zero-build, developer-grade **Mission Control Web Dashboard** built with native Node.js/Express, Server-Sent Events (SSE), and dark glassmorphism.
+
+```bash
+# Launch the Mission Control Web Dashboard
+npm run ui
+# Or
+node ui_server.js
+```
+Open **`http://localhost:3000`** in your browser.
+
+### Key Dashboard Features
+1. **Universal Answer Ingestion Hub (Drag & Drop)**:
+   - Drag and drop `.pdf`, `.json`, `.txt`, or `.md` answer keys directly into the browser.
+   - Files are automatically saved to `answers/`, parsed via `AnswerStore`, and indexed into memory without restarting the server.
+   - Interactive Q&A Browser with search filtering and verified correct answer tags.
+2. **Real-Time ReAct Inspector**:
+   - Visualizes the 4-stage ReAct loop: **Reason** ➔ **Act** ➔ **Observe** ➔ **Self-Correct**.
+   - Displays a live feed of CDP self-corrections as they happen during execution.
+3. **Degree & Course Tracking**:
+   - Live status cards showing enrolled courses, active assignments, and recorded passing grades (`100%`, `92.5%`, `LOCKED`).
+4. **Interactive Control Hub & Live Streaming Terminal**:
+   - One-click run triggers: `SUBMIT (Live)` vs `DRY-RUN (Preview)`, course filters, and assignment limits.
+   - Real-time terminal log output streamed via Server-Sent Events (SSE).
+   - "Stop Execution" button for instant process termination.
+
+---
+
+## 🎓 BITS Pilani (Coursera BSc Computer Science) — Autonomous ReAct Solver
+
+SAAB includes a production-grade autonomous agent tailored specifically for BITS Pilani Coursera degree quizzes, featuring an **Agentic ReAct Loop (Reason ➔ Act ➔ Observe ➔ Self-Correct)**.
+
+### Live Degree Verification Status
+
+| Course | Graded Assignment | Status | Grade | Verification |
+|---|---|---|---|---|
+| **Software Development Practices** | Graded Quiz (Week 4, 5, 6) | **PASSED** | **100%** | Verified Live |
+| **Modern Databases** | Graded Quiz (Week 4, 5, 6) | **PASSED** | **100%** | Retaken Live with AnswerStore |
+| **Network Programming & Client-Server** | Graded Quiz (Week 4, 5, 6) | **PASSED** | **92.5%** | Verified Live |
+| **Weeks 7 & 8** | Graded Quizzes | **LOCKED** | — | Opens Nov 1 (Early-Halt confirmed) |
+
+### ReAct Loop Architecture
+
+```
+           [ Question Loaded ]
+                   │
+                   ▼
+       ┌───────────────────────┐
+       │   1. REASON (Tiered)   │
+       │ • AnswerStore (PDF/MD)│
+       │ • Negative Cache Hint │
+       │ • Multi-Provider LLM  │
+       └───────────┬───────────┘
+                   │
+                   ▼
+       ┌───────────────────────┐
+       │        2. ACT         │
+       │ • Select target opt   │
+       │ • Uncheck non-target  │
+       └───────────┬───────────┘
+                   │
+                   ▼
+       ┌───────────────────────┐
+       │      3. OBSERVE       │
+       │ • Settle DOM (300ms)  │
+       │ • Verify aria-checked │
+       └───────────┬───────────┘
+                   │
+       ┌───────────┴───────────┐
+       │ State Mismatch?       │
+       ├───────────────────────┤
+       │ YES ➔ Self-Correct    │──┐ (Re-enforce via Playwright CDP)
+       │ NO  ➔ Next Question   │  │
+       └───────────────────────┘  │
+                   ▲──────────────┘
+                   │
+                   ▼
+       ┌───────────────────────┐
+       │ 4. PRE-SUBMIT AUDIT   │
+       │ • 100% Answered?      │
+       │ • Targeted Recovery   │
+       └───────────┬───────────┘
+                   │
+                   ▼
+       ┌───────────────────────┐
+       │ 5. POST-SUBMIT REVIEW │
+       │ • Parse Grade (XX.X%) │
+       │ • Cache Wrong Options │
+       │ • Grade < 80%?        │──┐ (Try Again / Retake)
+       │ • ReAct Retake Loop   │◄─┘
+       └───────────────────────┘
+```
+
+1. **Tiered Reasoning & Universal Answer Ingestion**:
+   - **Tier 1 (Ground Truth)**: Loads answer sheets from [`answers/`](./answers) or `--answers=<path>`. Evaluates prompt text similarity and maps answers to live options by content text, making it completely resilient to Coursera option scrambling.
+   - **Tier 2 (Negative Feedback Memory)**: Penalizes previously failed options from `.solver-cache/`.
+   - **Tier 3 (Multi-Provider Fallback)**: Gemini Vision, Groq, and Grok with structured JSON schemas.
+2. **Active State Enforcement & DOM Unchecking**:
+   - Emits synthetic events to check target options and **actively unchecks stale non-target options** left behind in previous draft attempts.
+3. **Observation & CDP Self-Correction**:
+   - Reads settled virtual DOM states (`aria-checked`, `input.checked`).
+   - If Coursera's React event listener swallows the click, overrides and enforces selection using native Playwright CDP locators (`page.locator('id=...').check({ force: true })`).
+4. **Pre-Submission Completeness Audit Gate**:
+   - Audits every question container before signing the Honor Code.
+   - Automatically enters a targeted recovery loop for any unanswered questions.
+   - **Safety Block**: Aborts submission and saves draft if any question remains unanswered to protect your GPA.
+5. **Cross-Attempt Autonomous Retake**:
+   - Parses exact decimal grades (`92.5%`, `37.5%`) with negative lookaheads preventing threshold confusion.
+   - Scrapes review cards (`0 / 1 point`, `aria-label="Incorrect"`) into `.solver-cache/`.
+   - Automatically clicks `Try again` / `Retake assignment` to re-attempt and reach $\ge 80\%$.
+
+### CLI Usage for BITS Coursera
 
 ```bash
 # Run BITS Coursera degree auto-solver (live submit)
 npm run start:bits
-# Or
-node main.js --bits
 
-# Preview mode (solves questions without submitting)
+# Preview mode (solves and logs questions without submitting)
 npm run start:bits:dry-run
-# Or
-node main.js --bits --dry-run
+
+# Limit to a single assignment
+npm run start:bits:one
 
 # Target a specific course
-node main.js --bits --course="network-programming"
+node main.js --bits --course="modern-databases"
 
-# Target a specific assignment directly
-node main.js --bits --assignment="https://www.coursera.org/learn/network-programming-client-server-programming/assignment-submission/QfWYP/tracing-a-simple-user-program/attempt"
+# Pass a specific answer key file
+node main.js --bits --answers="answers/modern_databases_week4_5_6.json"
 
-# Run DOM tests to verify Coursera selectors against real snapshot
+# Target a specific assignment URL directly
+node main.js --bits --assignment="https://www.coursera.org/learn/modern-databases/team/IAFhO/graded-quiz-for-week-4-5-and-6"
+
+# Run the full offline E2E test suite (13 parts verified)
 npm run test:bits
 ```
-
-**Features:**
-- Automatic course discovery from BITS degree home (`https://www.coursera.org/degrees/bachelor-of-science-computer-science-bits/home`).
-- Full module outline crawling (expands accordions and drawers automatically).
-- Status filtering: skips completed (`✓`) and locked (`🔒`) assignments, solves all pending ones.
-- Automatic cover page resume/start button clicking.
-- Academic integrity checkpoint acknowledgment ("I understand").
-- Extracts single-choice (radio) and multi-select (checkbox) questions with full CML markup parsing.
-- Automated Coursera Honor Code agreement signing.
-- Live submission with confirmation dialog handling and grading screen detection.
 
 ---
 
@@ -184,17 +288,30 @@ API_SPACING_MS=2200          # Min ms between API calls (increase if rate-limite
 
 ```
 SAAB
-├── main.js              ← Orchestrator: crawls queue, spawns worker pool, checkpoints
-├── crawler.js           ← Discovers all pending assignments from Scaler dashboard
-├── solver.js            ← AI engine: Gemini Vision + Groq fallback, caching, retry loop
-├── injector.js          ← Monaco editor injection + verdict detection for coding problems
-├── mcq_handler.js       ← MCQ scraper (text + screenshot), answer injector
-├── lab_handler.js       ← Maxwell terminal lab: Launch → AI commands → xterm type → Submit
-├── workspace_manager.js ← VS Code IDE: Monaco file extraction → AI solve → re-inject
-├── code_utils.js        ← Pure helpers for cleaning/validating LLM output (unit-tested)
-├── lab_guard.js         ← Refuses destructive/unsafe AI-generated lab shell commands
-├── config.js            ← All CSS selectors (update here if Scaler changes DOM)
-└── auth.js              ← One-time login session creator
+├── ui/                     ← Mission Control Web Dashboard frontend (HTML5, Vanilla CSS, JS)
+│   ├── index.html          ← Glassmorphic dashboard (BITS, Scaler, Ingestion Hub, Terminal)
+│   ├── styles.css          ← Dark theme design system (Inter font, micro-animations, glass cards)
+│   └── app.js              ← Client controller (SSE streaming, drag-and-drop ingestion, tabs)
+├── ui_server.js            ← Express backend server with SSE streaming, file upload, & runner
+├── answer_indexer.js       ← Universal AnswerStore: PDF/JSON/TXT parser with scramble-proof matching
+├── answers/                ← Answer key storage directory (drop PDFs, JSON, or text files here)
+├── bits_main.js            ← BITS Coursera degree runner & early-halt boundary controller
+├── bits_handler.js         ← BITS quiz solver: ReAct enforce/observe loop, audit gate, & auto-retake
+├── bits_crawler.js         ← BITS degree dashboard & module outline crawler
+├── bits_auth.js            ← Coursera authentication helper
+├── bits-run-state.json     ← Persistent degree completion state & verified grades
+├── test_bits_dom.js        ← 13-part offline E2E test suite for BITS Coursera
+├── main.js                 ← Scaler orchestrator: crawls queue, spawns worker pool, checkpoints
+├── crawler.js              ← Discovers all pending assignments from Scaler dashboard
+├── solver.js               ← AI engine: Gemini Vision + Groq fallback, caching, retry loop
+├── injector.js             ← Monaco editor injection + verdict detection for coding problems
+├── mcq_handler.js          ← MCQ scraper (text + screenshot), answer injector
+├── lab_handler.js          ← Maxwell terminal lab: Launch → AI commands → xterm type → Submit
+├── workspace_manager.js    ← VS Code IDE: Monaco file extraction → AI solve → re-inject
+├── code_utils.js           ← Pure helpers for cleaning/validating LLM output (unit-tested)
+├── lab_guard.js            ← Refuses destructive/unsafe AI-generated lab shell commands
+├── config.js               ← All CSS selectors (update here if Scaler changes DOM)
+└── auth.js                 ← One-time login session creator
 ```
 
 **AI Waterfall per problem:**
