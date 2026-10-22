@@ -9,19 +9,24 @@
     "start:mcq": "node main.js --only-mcq",
     "start:labs": "node main.js --only-labs",
     "start:skip-labs": "node main.js --skip-labs",
-    "start:bits": "node main.js --bits",
+    "start:bits": "node main.js --bits --submit",
     "start:bits:dry-run": "node main.js --bits --dry-run",
+    "start:bits:one": "node main.js --bits --dry-run --limit=1",
+    "auth": "node auth.js",
+    "auth:bits": "node bits_auth.js",
     "test:bits": "node test_bits_dom.js",
+    "ui": "node ui_server.js",
     "dry-run": "node main.js --dry-run",
     "dry-run:mcq": "node main.js --dry-run --only-mcq",
-    "auth": "node auth.js",
     "test": "node --test \"test/*.test.js\"",
     "lint": "eslint ."
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "dotenv": "^16.4.5",
+    "express": "^5.3.0",
     "fs-extra": "^11.3.4",
+    "pdf-parse": "^2.4.5",
     "playwright": "^1.48.0"
   },
   "devDependencies": {
