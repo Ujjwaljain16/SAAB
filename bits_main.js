@@ -8,6 +8,7 @@ import { BITS_URLS } from './bits_config.js';
 import { discoverDegreeDashboard, crawlCourseOutline, ensureCourseraLoggedIn } from './bits_crawler.js';
 import { solveAndSubmitCourseraAssignment } from './bits_handler.js';
 import { solverStats } from './solver.js';
+import { answerStore } from './answer_indexer.js';
 
 let globalHaltRun = false;
 let globalHaltReason = '';
@@ -30,28 +31,38 @@ export async function runBits(options = {}) {
   const DRY_RUN = options.dryRun ?? (process.argv.includes('--dry-run') && !process.argv.includes('--submit'));
   const COURSE_ARG = options.course ?? (process.argv.find((a) => a.startsWith('--course='))?.split('=')[1] || '');
   const ASSIGNMENT_ARG = options.assignment ?? (process.argv.find((a) => a.startsWith('--assignment='))?.split('=')[1] || '');
+  const LIMIT_ARG = parseInt(options.limit ?? (process.argv.find((a) => a.startsWith('--limit='))?.split('=')[1] || '0'), 10);
+  const ANSWERS_ARG = options.answers ?? (process.argv.find((a) => a.startsWith('--answers='))?.split('=')[1] || process.env.BITS_ANSWERS_PATH || '');
 
   console.log(`\n============================================================`);
   console.log(`🎓 BITS Pilani BSc Computer Science — Coursera Auto-Solver`);
   console.log(`Mode: ${DRY_RUN ? 'DRY-RUN (Preview Only)' : 'SUBMIT (Live)'}`);
   if (COURSE_ARG) console.log(`Course filter: "${COURSE_ARG}"`);
   if (ASSIGNMENT_ARG) console.log(`Direct assignment: "${ASSIGNMENT_ARG}"`);
+  if (LIMIT_ARG > 0) console.log(`Limit: ${LIMIT_ARG} assignment(s)`);
+  if (ANSWERS_ARG) console.log(`Answer key: "${ANSWERS_ARG}"`);
   console.log(`============================================================\n`);
 
-  const userDataDir = path.join(process.cwd(), 'temp_chrome_profile');
-  const profileName = 'Profile 3';
-
-  if (!fs.existsSync(userDataDir)) {
-    console.error("temp_chrome_profile not found. Please ensure Chrome profile directory exists.");
-    process.exit(1);
+  // Load Answer Key if provided or present in answers/ directory
+  if (ANSWERS_ARG) {
+    await answerStore.loadFile(ANSWERS_ARG);
   }
+  await answerStore.loadDirectory('answers');
 
+  const userDataDir = process.env.BITS_PROFILE_DIR
+    ? path.resolve(process.env.BITS_PROFILE_DIR)
+    : path.join(process.cwd(), 'temp_chrome_profile_bits');
+
+  fs.mkdirSync(userDataDir, { recursive: true });
+
+  console.log(`[BITS] 🌐 Launching visible Chrome browser window (headed mode)...`);
   const ctx = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
     channel: 'chrome',
     permissions: ['clipboard-read', 'clipboard-write'],
     args: [
-      `--profile-directory=${profileName}`,
+      '--start-maximized',
+      '--window-position=50,50',
       '--disable-extensions',
       '--disable-sync',
       '--disable-background-timer-throttling',
@@ -59,7 +70,7 @@ export async function runBits(options = {}) {
       '--no-first-run',
       '--no-default-browser-check'
     ],
-    viewport: { width: 1280, height: 800 }
+    viewport: null
   });
 
   // Optimize traffic by blocking analytics/ads
@@ -72,6 +83,7 @@ export async function runBits(options = {}) {
   });
 
   const page = ctx.pages()[0] || (await ctx.newPage());
+  await page.bringToFront().catch(() => {});
   const runLog = [];
   const metrics = {
     startedAt: Date.now(),
@@ -87,7 +99,7 @@ export async function runBits(options = {}) {
     // 1. Direct Assignment Mode
     if (ASSIGNMENT_ARG) {
       console.log(`[BITS] Direct assignment mode requested: ${ASSIGNMENT_ARG}`);
-      const result = await solveAndSubmitCourseraAssignment(page, ASSIGNMENT_ARG, { dryRun: DRY_RUN });
+      const result = await solveAndSubmitCourseraAssignment(page, ASSIGNMENT_ARG, { dryRun: DRY_RUN, answerStore });
       runLog.push({ url: ASSIGNMENT_ARG, result });
       if (result.status === 'pass') metrics.solved++;
       else if (result.status === 'dry-run') metrics.dryRun++;
@@ -112,6 +124,11 @@ export async function runBits(options = {}) {
       console.log(`[BITS] Filtered to ${targetDeadlines.length} assignment(s) matching course "${COURSE_ARG}".`);
     }
 
+    if (LIMIT_ARG > 0 && targetDeadlines.length > LIMIT_ARG) {
+      targetDeadlines = targetDeadlines.slice(0, LIMIT_ARG);
+      console.log(`[BITS] Limiting to ${targetDeadlines.length} assignment(s) (--limit=${LIMIT_ARG}).`);
+    }
+
     // 3. Process Pending Assignments from Deadlines Feed
     if (targetDeadlines.length > 0) {
       console.log(`\n============================================================`);
@@ -128,7 +145,7 @@ export async function runBits(options = {}) {
         console.log(`   URL:    ${assignment.url}`);
 
         try {
-          const res = await solveAndSubmitCourseraAssignment(page, assignment.url, { dryRun: DRY_RUN });
+          const res = await solveAndSubmitCourseraAssignment(page, assignment.url, { dryRun: DRY_RUN, answerStore });
           runLog.push({ title: assignment.title, course: assignment.course, url: assignment.url, ...res });
 
           if (res.status === 'pass') metrics.solved++;
@@ -138,6 +155,19 @@ export async function runBits(options = {}) {
 
           const mark = res.status === 'pass' ? '✓' : (res.status === 'dry-run' ? '↺' : '⚠️');
           console.log(`  ${mark} Finished: "${assignment.title}" [${res.status}]`);
+
+          // Early-halt boundary: If this quiz is not live yet / locked for a future date,
+          // ALL subsequent quizzes in the chronological feed are also future/not live. Break immediately!
+          if (res.isFutureLocked) {
+            console.log(`\n============================================================`);
+            console.log(`🛑 [BITS] Halting scan at first unavailable/future quiz:`);
+            console.log(`   Assignment: "${assignment.title}"`);
+            console.log(`   Course:     ${assignment.course}`);
+            console.log(`   Status:     ${res.reason || 'Not live yet / unavailable'}`);
+            console.log(`   Remaining deadlines in queue are future-locked. Halting run.`);
+            console.log(`============================================================\n`);
+            break;
+          }
         } catch (err) {
           console.error(`  ✗ Error solving "${assignment.title}":`, err.message);
           metrics.failed++;
@@ -147,11 +177,15 @@ export async function runBits(options = {}) {
         await DELAY(2000);
       }
     } else {
-      console.log(`[BITS] No pending deadline assignments found on dashboard.`);
+      console.log(`\n============================================================`);
+      console.log(`🎉 [BITS] All current deadline assignments are 100% completed and passed!`);
+      console.log(`   No pending deadline quizzes remaining on dashboard.`);
+      console.log(`============================================================\n`);
     }
 
-    // 4. If no pending deadline assignments or if specific course requested, crawl course modules
-    if (targetDeadlines.length === 0 && dashboard.courses.length > 0) {
+    // 4. Course module outlines are ONLY crawled if explicitly requested via --all-modules
+    const CRAWL_MODULES = process.argv.includes('--all-modules') || process.argv.includes('--crawl-course');
+    if (CRAWL_MODULES && targetDeadlines.length === 0 && dashboard.courses.length > 0) {
       console.log(`\n[BITS] Checking course module outlines for internal practice assignments/quizzes...`);
       let coursesToCrawl = dashboard.courses;
       if (COURSE_ARG) {
@@ -188,6 +222,11 @@ export async function runBits(options = {}) {
             else if (res.status === 'dry-run') metrics.dryRun++;
             else if (res.status === 'skipped') metrics.skipped++;
             else metrics.failed++;
+
+            if (res.isFutureLocked) {
+              console.log(`[BITS] Course module quiz is not live yet: "${item.title}". Halting module scan.`);
+              break;
+            }
           } catch (err) {
             console.error(`  ✗ Error solving "${item.title}":`, err.message);
             metrics.failed++;

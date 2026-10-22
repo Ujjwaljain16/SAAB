@@ -29,12 +29,14 @@ export const COURSERA_SEL = {
 
   // Cover Page / Team Launch Page
   coverContainer: '[data-testid="rc-CoverPageContainer"], [data-testid="assignment-cover-redesign"], .rc-CoverPageContainer',
-  coverActionButton: 'button[data-testid="CoverPageActionButton"], button[aria-label*="Resume assignment"], button[aria-label*="Start assignment"], a:has-text("Start"), a:has-text("Resume"), a:has-text("Go to assignment"), button:has-text("Start"), button:has-text("Resume"), button:has-text("Go to assignment")',
+  coverActionButton: 'button[data-testid="CoverPageActionButton"], button[data-e2e="CoverPageActionButton"], button[aria-label="Start assignment"], button[aria-label="Resume assignment"], button[aria-label*="Start assignment"], button[aria-label*="Resume assignment"], button:has-text("Start assignment"), button:has-text("Resume assignment"), button:has-text("Start"), button:has-text("Resume"), button:has-text("Go to assignment")',
   
   // Tunnel Vision (Exam / Assignment Attempt)
   tunnelContainer: '[data-testid="assignment-view-tunnel-vision"], [data-testid="tunnel-vision-content"]',
   tunnelBackBtn: 'button[data-testid="tunnel-vision-back-button"]',
   guidelinesAckBtn: 'button[data-action="acknowledge-guidelines"], button:has-text("I understand")',
+  honorCodeModal: 'div[role="dialog"], div[aria-modal="true"], .cds-Dialog-dialog',
+  honorCodeModalContinueBtn: 'button[data-testid="continue-button"], button[data-action="acknowledge-guidelines"], button:has-text("Continue"), button:has-text("Start assignment"), button:has-text("Start attempt"), button:has-text("Start quiz"), button:has-text("Start"), button:has-text("I understand"), button:has-text("I agree"), button:has-text("Accept")',
   
   // Questions
   questionContainer: 'div[data-testid^="part-Submission_"], div[class*="part-Submission_"]',
