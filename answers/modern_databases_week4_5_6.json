@@ -1,0 +1,78 @@
+[
+  {
+    "prompt": "A social media platform wants to represent users and their friendships so that it can find mutual friends and recommend connections. Which concepts are appropriate for this scenario?",
+    "correctAnswers": [
+      "Graph database",
+      "Neo4j",
+      "Cypher queries"
+    ]
+  },
+  {
+    "prompt": "In a social-media graph, users are represented as nodes and friendships as relationships. Which tasks can be naturally performed using the graph model?",
+    "correctAnswers": [
+      "Finding a user's connections",
+      "Finding mutual friends",
+      "Generating relationship-based recommendations"
+    ]
+  },
+  {
+    "prompt": "A Neo4j application needs to retrieve users who satisfy a condition, such as users connected to a particular person. Which capabilities are relevant?",
+    "correctAnswers": [
+      "Filtering query results",
+      "Cypher queries",
+      "Graph relationships"
+    ]
+  },
+  {
+    "prompt": "A cloud application stores shopping carts using DynamoDB. The number of customers is growing rapidly. Which Week 5 concepts are relevant when designing this system?",
+    "correctAnswers": [
+      "Data distribution",
+      "Partitioning",
+      "Key-value data model"
+    ]
+  },
+  {
+    "prompt": "A company wants to compare Redis with a relational database such as MySQL for read and write workloads. Which activities fit the Week 6 practical focus?",
+    "correctAnswers": [
+      "Comparing in-memory and relational databases",
+      "Benchmarking read performance",
+      "Benchmarking write performance"
+    ]
+  },
+  {
+    "prompt": "A database keeps frequently accessed application data in main memory to achieve very fast read and write performance. What type of database is being described?",
+    "correctAnswers": [
+      "In-memory database"
+    ]
+  },
+  {
+    "prompt": "A company wants to evaluate whether Redis provides faster database operations than MySQL for a particular workload. What should it perform?",
+    "correctAnswers": [
+      "Performance benchmarking"
+    ]
+  },
+  {
+    "prompt": "Which are characteristics of graph databases?",
+    "correctAnswers": [
+      "Relationships connect entities",
+      "Nodes represent entities",
+      "Graph traversal can be used to explore connections"
+    ]
+  },
+  {
+    "prompt": "Which are key concepts associated with key-value stores?",
+    "correctAnswers": [
+      "Key-value data model",
+      "Partitioning",
+      "Data distribution"
+    ]
+  },
+  {
+    "prompt": "Which topics are included in the study of in-memory databases?",
+    "correctAnswers": [
+      "Persistence",
+      "Recovery strategies",
+      "Performance tuning"
+    ]
+  }
+]
