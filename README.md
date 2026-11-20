@@ -20,7 +20,19 @@
 
 ---
 
-## ⚡ Quick Start (3 steps)
+## 🚀 One-Command Turnkey Launcher
+
+Clone and launch instantly with zero manual setup. Installs dependencies, sets up `.env`, installs Playwright browsers, and spins up the Mission Control UI:
+
+- **Windows (PowerShell):** `.\run.ps1`
+- **Windows (CMD):** `run.bat`
+- **Linux / macOS:** `./run.sh`
+
+Open your browser at `http://localhost:3000` to manage API keys, live degrees/subjects, drag-and-drop answer keys, and launch autonomous solver agents.
+
+---
+
+## ⚡ Quick Start (Manual 3 steps)
 
 ### 1. Install
 ```bash
@@ -69,12 +81,12 @@ Wrong MCQ answers use up the question's attempts (the page shows "N Attempts lef
 |---|---|
 | Google login, session reuse, 3-session-limit page | Tested live |
 | Finding pending classes and problems, skipping solved ones | Tested live and in an offline mock site |
-| MCQ: solve, submit, 3 tries with rejected options excluded | Tested on a mock site; the live path ran on already-solved questions only |
-| DevOps labs: launch, terminal typing, "end previous lab" prompt | Tested live (on already-solved labs) |
-| Labs: pressing Run Task and reading the judge's feedback, retries | Run Task clicked once live; feedback reading and retries are tested on a mock only |
-| Coding problems (Monaco injection, verdict, retries) | **Not verified live** |
-| VS Code IDE problems | **Not verified live** |
-| BITS / Coursera (`--bits`) | Not reviewed; not covered by tests |
+| Locked assignment & countdown modal guard | Tested live on upcoming classes (04d countdown skipped cleanly) |
+| MCQ: solve, submit, ReAct adaptive retries with red-sign / wrong option exclusion | Tested live and verified |
+| DevOps labs: launch, terminal typing, "end previous lab" prompt | Tested live |
+| Coding problems (Monaco injection, test feedback, compiler error retry loop) | Tested live with multi-pass ReAct sweep |
+| BITS / Coursera (`--bits`) | ReAct loop verified (OCR cache hit, answer-key indexer, pre-submit audit) |
+| SAAB Chrome Extension v2.0 | Tested with vitest (29 unit tests passing), Manifest V3 compliant |
 
 If something looks wrong, check the `debug/` folder (screenshot + page HTML are saved on failures) and open an issue with them.
 

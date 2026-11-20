@@ -17,7 +17,7 @@ dump_problem_dom.js
 *.log
 .DS_Store
 api-endpoints.json
-curriculum-cache.json
+curriculum-cache*.json
 *.png
 !arch.png
 data/
@@ -26,3 +26,9 @@ debug/
 .quota/
 bits-run-state.json
 answers/*.pdf
+extension/dist/
+extension/*.zip
+dist/
+build/
+.turbo/
+*.pma
