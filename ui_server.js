@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { AnswerStore } from './answer_indexer.js';
+import { AnswerStore, answerStore } from './answer_indexer.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +18,9 @@ app.use(express.static(path.join(__dirname, 'ui')));
 
 // Connected SSE clients for real-time log streaming
 const sseClients = new Set();
+const LOG_BUFFER_MAX = 300;
+const logBuffer = [];
+const reactStepsBuffer = [];
 
 function broadcastEvent(type, data) {
   const payload = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -30,6 +33,18 @@ function broadcastEvent(type, data) {
   }
 }
 
+function recordLog(stream, text) {
+  logBuffer.push({ stream, text, time: Date.now() });
+  if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift();
+  broadcastEvent('log', { stream, text });
+}
+
+function recordReactStep(data) {
+  reactStepsBuffer.push(data);
+  if (reactStepsBuffer.length > 50) reactStepsBuffer.shift();
+  broadcastEvent('react_step', data);
+}
+
 let activeProcess = null;
 
 // Ensure answers directory exists
@@ -37,6 +52,25 @@ const ANSWERS_DIR = path.join(__dirname, 'answers');
 if (!fs.existsSync(ANSWERS_DIR)) {
   fs.mkdirSync(ANSWERS_DIR, { recursive: true });
 }
+
+// In-memory AnswerStore cache management
+let answersInitPromise = null;
+function ensureAnswerStoreLoaded(forceReload = false) {
+  if (forceReload || !answersInitPromise) {
+    answersInitPromise = (async () => {
+      if (forceReload) {
+        answerStore.entries = [];
+      }
+      await answerStore.loadDirectory(ANSWERS_DIR);
+    })().catch((err) => {
+      console.error(`[Answer Store] Directory load failed: ${err.message}`);
+    });
+  }
+  return answersInitPromise;
+}
+
+// Pre-warm the answer store in the background on boot
+ensureAnswerStoreLoaded();
 
 // -------------------------------------------------------------
 // REST API ENDPOINTS
@@ -54,59 +88,197 @@ app.get('/api/status', (req, res) => {
     }
   }
 
+  let runLog = [];
+  const runLogPath = path.join(__dirname, 'bits-run-log.json');
+  if (fs.existsSync(runLogPath)) {
+    try {
+      runLog = JSON.parse(fs.readFileSync(runLogPath, 'utf8'));
+    } catch {
+      runLog = [];
+    }
+  }
+
+  let liveCache = null;
+  const cachePath = path.join(__dirname, 'curriculum-cache-bits.json');
+  if (fs.existsSync(cachePath)) {
+    try {
+      liveCache = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    } catch {
+      liveCache = null;
+    }
+  }
+
   let answerFiles = [];
   if (fs.existsSync(ANSWERS_DIR)) {
     answerFiles = fs.readdirSync(ANSWERS_DIR).filter((f) => !f.startsWith('.'));
   }
 
-  // Pre-configured BITS enrolled course list
-  const enrolledCourses = [
-    {
-      id: 'modern-databases',
-      name: 'Modern Databases',
-      slug: 'modern-databases',
-      currentQuiz: 'Graded Quiz for Week 4,5 and 6',
-      url: 'https://www.coursera.org/learn/modern-databases/team/IAFhO/graded-quiz-for-week-4-5-and-6',
-      status: runState['https://www.coursera.org/learn/modern-databases/team/IAFhO/graded-quiz-for-week-4-5-and-6']?.status || 'pending',
-      grade: runState['https://www.coursera.org/learn/modern-databases/team/IAFhO/graded-quiz-for-week-4-5-and-6']?.grade ?? null
-    },
-    {
-      id: 'network-programming',
-      name: 'Network Programming and Client-Server Programming',
-      slug: 'network-programming-client-server-programming',
-      currentQuiz: 'Graded Quiz for Week 4,5 and 6',
-      url: 'https://www.coursera.org/learn/network-programming-client-server-programming/team/RDBiY/graded-quiz-for-week-4-5-and-6',
-      status: runState['https://www.coursera.org/learn/network-programming-client-server-programming/team/RDBiY/graded-quiz-for-week-4-5-and-6']?.status || 'pending',
-      grade: runState['https://www.coursera.org/learn/network-programming-client-server-programming/team/RDBiY/graded-quiz-for-week-4-5-and-6']?.grade ?? null
-    },
-    {
-      id: 'software-dev',
-      name: 'Software Development Practices',
-      slug: 'software-development-practices-bits',
-      currentQuiz: 'Graded Quiz for Week 4,5 and 6',
-      url: 'https://www.coursera.org/learn/software-development-practices-bits/team/R4a7I/graded-quiz-for-week-4-5-and-6',
-      status: 'pass',
-      grade: 100
+  // Known standard course metadata dictionary for clean display titles
+  const KNOWN_COURSE_NAMES = {
+    'modern-databases': 'Modern Databases',
+    'network-programming-client-server-programming': 'Network Programming and Client-Server Programming',
+    'network-programming': 'Network Programming and Client-Server Programming',
+    'software-development-practices-bits': 'Software Development Practices',
+    'software-development-practices': 'Software Development Practices'
+  };
+
+  // Helper to format course name from slug
+  const formatCourseName = (slug) => {
+    if (KNOWN_COURSE_NAMES[slug]) return KNOWN_COURSE_NAMES[slug];
+    const matchingKey = Object.keys(KNOWN_COURSE_NAMES).find((k) => slug.includes(k) || k.includes(slug));
+    if (matchingKey) return KNOWN_COURSE_NAMES[matchingKey];
+    return slug
+      .replace(/-bits$/i, '')
+      .split('-')
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+  };
+
+  // Helper to parse a human-readable quiz title from URL
+  const formatQuizTitle = (url) => {
+    if (!url) return 'Graded Quiz';
+    const match = url.match(/(graded-quiz-for-[^\/\?#]+)/i) || url.match(/\/team\/[^\/]+\/([^\/\?#]+)/i);
+    if (match) {
+      return match[1]
+        .split('-')
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
     }
-  ];
+    return 'Graded Assessment';
+  };
+
+  // Extract all distinct course slugs from live cache, runState, and runLog
+  const courseSlugSet = new Set();
+
+  if (liveCache && Array.isArray(liveCache.courses)) {
+    liveCache.courses.forEach((c) => {
+      if (c.slug) courseSlugSet.add(c.slug);
+    });
+  }
+
+  Object.keys(runState).forEach((url) => {
+    const m = url.match(/\/learn\/([^\/\?#]+)/);
+    if (m) courseSlugSet.add(m[1]);
+  });
+
+  runLog.forEach((item) => {
+    if (item.url) {
+      const m = item.url.match(/\/learn\/([^\/\?#]+)/);
+      if (m) courseSlugSet.add(m[1]);
+    }
+  });
+
+  // Ensure primary default enrolled BITS degree courses are present
+  if (courseSlugSet.size === 0) {
+    courseSlugSet.add('modern-databases');
+    courseSlugSet.add('network-programming-client-server-programming');
+    courseSlugSet.add('software-development-practices-bits');
+  }
+
+  // Build real live course cards
+  const enrolledCourses = [];
+
+  for (const slug of courseSlugSet) {
+    // Find all runState entries for this course
+    const courseEntries = Object.entries(runState).filter(([url]) => url.includes(slug));
+
+    // Sort by latest solved or highest week
+    courseEntries.sort(([urlA, dataA], [urlB, dataB]) => {
+      // Prioritize week number
+      const getWeek = (u) => {
+        const m = u.match(/week-?(\d+)/i);
+        return m ? parseInt(m[1], 10) : 0;
+      };
+      const wDiff = getWeek(urlB) - getWeek(urlA);
+      if (wDiff !== 0) return wDiff;
+      const tA = dataA.solvedAt ? new Date(dataA.solvedAt).getTime() : 0;
+      const tB = dataB.solvedAt ? new Date(dataB.solvedAt).getTime() : 0;
+      return tB - tA;
+    });
+
+    const latestSolved = courseEntries[0];
+    let courseName = formatCourseName(slug);
+    if (liveCache && Array.isArray(liveCache.courses)) {
+      const cObj = liveCache.courses.find((c) => c.slug === slug);
+      if (cObj && cObj.name) courseName = cObj.name;
+    }
+
+    let currentQuiz = 'Graded Assessment';
+    let quizUrl = '';
+    let status = 'pending';
+    let grade = null;
+    let questionsSolved = null;
+
+    if (latestSolved) {
+      quizUrl = latestSolved[0];
+      status = latestSolved[1].status || 'pass';
+      grade = latestSolved[1].grade !== undefined ? latestSolved[1].grade : 100;
+      questionsSolved = latestSolved[1].questionsSolved || 10;
+      currentQuiz = formatQuizTitle(quizUrl);
+    } else {
+      // Check live cache deadlines for pending assignments
+      if (liveCache && Array.isArray(liveCache.deadlines)) {
+        const dObj = liveCache.deadlines.find((d) => d.url && d.url.includes(slug));
+        if (dObj) {
+          currentQuiz = dObj.title || 'Upcoming Graded Assessment';
+          quizUrl = dObj.url || '';
+          status = dObj.status || 'pending';
+          grade = dObj.grade || null;
+        }
+      }
+    }
+
+    enrolledCourses.push({
+      id: slug,
+      name: courseName,
+      slug,
+      currentQuiz,
+      url: quizUrl,
+      status,
+      grade,
+      questionsSolved,
+      totalQuizzesAttempted: courseEntries.length
+    });
+  }
+
+  // Order courses logically
+  enrolledCourses.sort((a, b) => a.name.localeCompare(b.name));
 
   res.json({
     isRunning: Boolean(activeProcess),
     courses: enrolledCourses,
     runState,
+    liveCache: liveCache ? { syncedAt: liveCache.syncedAt, count: liveCache.courses?.length } : null,
     answerFilesCount: answerFiles.length,
     answerFiles
   });
 });
 
-// 2. Get detailed parsed questions from the AnswerStore
+// 1.1 Trigger live sync from authenticated Coursera degree account
+app.post('/api/sync-courses', async (req, res) => {
+  try {
+    broadcastEvent('log', { stream: 'stdout', text: '[Degree Sync] Initiating real-time scan of Coursera Degree Dashboard...\n' });
+    const { syncLiveDegreeStatus } = await import('./sync_degree_status.js');
+    const syncResult = await syncLiveDegreeStatus({ headless: true });
+    broadcastEvent('log', { stream: 'stdout', text: `[Degree Sync] ✓ Successfully refreshed ${syncResult.courses.length} enrolled courses and ${syncResult.deadlines.length} deadlines.\n` });
+    res.json({ success: true, ...syncResult });
+  } catch (err) {
+    broadcastEvent('log', { stream: 'stderr', text: `[Degree Sync] Sync failed: ${err.message}\n` });
+    res.status(500).json({ error: `Sync failed: ${err.message}` });
+  }
+});
+
+// 2. Get detailed parsed questions from the AnswerStore (cached in-memory)
 app.get('/api/answers', async (req, res) => {
   try {
-    const store = new AnswerStore();
-    await store.loadDirectory(ANSWERS_DIR);
+    if (req.query.reload === 'true') {
+      await ensureAnswerStoreLoaded(true);
+    } else {
+      await ensureAnswerStoreLoaded(false);
+    }
     res.json({
-      totalQuestions: store.entries.length,
-      entries: store.entries
+      totalQuestions: answerStore.entries.length,
+      entries: answerStore.entries
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -126,17 +298,19 @@ app.post('/api/upload', (req, res) => {
 
   writeStream.on('finish', async () => {
     try {
-      const store = new AnswerStore();
-      await store.loadFile(targetPath);
+      await ensureAnswerStoreLoaded(false);
+      await answerStore.loadFile(targetPath);
+      const fileEntries = answerStore.entries.filter((e) => e.source === safeFileName);
       broadcastEvent('answer_uploaded', {
         filename: safeFileName,
-        questionsCount: store.entries.length
+        questionsCount: fileEntries.length,
+        totalQuestions: answerStore.entries.length
       });
       res.json({
         success: true,
         filename: safeFileName,
-        questionsParsed: store.entries.length,
-        entries: store.entries
+        questionsParsed: fileEntries.length,
+        entries: fileEntries
       });
     } catch (err) {
       res.status(500).json({ error: `Saved file, but parsing failed: ${err.message}` });
@@ -148,47 +322,187 @@ app.post('/api/upload', (req, res) => {
   });
 });
 
-// 4. Trigger auto-solver execution
+// Helper to update .env on disk safely
+function updateEnvFile(updates) {
+  const envPath = path.join(__dirname, '.env');
+  let content = '';
+  if (fs.existsSync(envPath)) {
+    content = fs.readFileSync(envPath, 'utf8');
+  } else if (fs.existsSync(path.join(__dirname, '.env.example'))) {
+    content = fs.readFileSync(path.join(__dirname, '.env.example'), 'utf8');
+  }
+
+  let lines = content.split('\n');
+  for (const [key, val] of Object.entries(updates)) {
+    if (val === undefined || val === null || val === '') continue;
+    let found = false;
+    lines = lines.map((line) => {
+      if (line.trim().startsWith(`${key}=`)) {
+        found = true;
+        return `${key}=${val}`;
+      }
+      return line;
+    });
+    if (!found) {
+      lines.push(`${key}=${val}`);
+    }
+    process.env[key] = val;
+  }
+
+  fs.writeFileSync(envPath, lines.join('\n'), 'utf8');
+}
+
+// 4. Get current user settings (masked credentials)
+app.get('/api/settings', (req, res) => {
+  const geminiKey = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '';
+  const maskedKey = geminiKey ? `${geminiKey.slice(0, 6)}...${geminiKey.slice(-4)}` : '';
+
+  res.json({
+    hasGeminiKey: Boolean(geminiKey),
+    geminiKeyMasked: maskedKey,
+    geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    bitsEmail: process.env.BITS_EMAIL || '',
+    hasBitsPass: Boolean(process.env.BITS_PASS),
+    scalerEmail: process.env.SCALER_EMAIL || '',
+    hasScalerPass: Boolean(process.env.SCALER_PASS)
+  });
+});
+
+// 5. Update user credentials & API keys
+app.post('/api/settings', (req, res) => {
+  try {
+    const { geminiApiKey, geminiModel, bitsEmail, bitsPassword, scalerEmail, scalerPassword } = req.body || {};
+    const updates = {};
+
+    if (geminiApiKey) {
+      updates.GEMINI_API_KEYS = geminiApiKey.trim();
+      updates.GEMINI_API_KEY = geminiApiKey.trim();
+    }
+    if (geminiModel) updates.GEMINI_MODEL = geminiModel.trim();
+    if (bitsEmail) updates.BITS_EMAIL = bitsEmail.trim();
+    if (bitsPassword) updates.BITS_PASS = bitsPassword.trim();
+    if (scalerEmail) updates.SCALER_EMAIL = scalerEmail.trim();
+    if (scalerPassword) updates.SCALER_PASS = scalerPassword.trim();
+
+    updateEnvFile(updates);
+    res.json({ success: true, message: 'Settings saved to local environment successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to save settings: ${err.message}` });
+  }
+});
+
+// 6. Test Gemini API Key connectivity
+app.post('/api/test-key', async (req, res) => {
+  const apiKey = (req.body?.apiKey || process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '').trim();
+  const modelName = (req.body?.model || process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim();
+
+  if (!apiKey) {
+    return res.status(400).json({ success: false, message: 'API key is required to test connectivity.' });
+  }
+
+  const modelsToTry = Array.from(new Set([modelName, 'gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-4-hydrogen']));
+  let lastError = null;
+
+  try {
+    const { GoogleGenerativeAI } = await import('@google/generative-ai');
+    const firstKey = apiKey.split(',')[0].trim();
+    const genAI = new GoogleGenerativeAI(firstKey);
+
+    for (const m of modelsToTry) {
+      try {
+        const model = genAI.getGenerativeModel({ model: m });
+        await model.generateContent('Ping');
+        const fallbackNote = m !== modelName ? ` (tested via fallback ${m} as ${modelName} was experiencing high demand)` : '';
+        return res.json({ success: true, message: `Connected successfully to Google Gemini (${m})!${fallbackNote}` });
+      } catch (mErr) {
+        lastError = mErr;
+        // Continue to fallback if high demand / overloaded
+        if (mErr.message?.toLowerCase().includes('demand') || mErr.message?.includes('503') || mErr.message?.includes('429')) {
+          continue;
+        }
+        break;
+      }
+    }
+    res.json({ success: false, message: `Connection failed: ${lastError?.message || 'Could not reach Gemini.'}` });
+  } catch (err) {
+    res.json({ success: false, message: `Connection failed: ${err.message}` });
+  }
+});
+
+// 7. Trigger auto-solver execution (BITS Coursera or Scaler Academy)
 app.post('/api/run', (req, res) => {
   if (activeProcess) {
     return res.status(409).json({ error: 'A run is already in progress. Stop it first or wait for completion.' });
   }
 
-  const { mode = 'submit', course = '', limit = 0, answersPath = '' } = req.body || {};
+  const {
+    platform = 'bits',
+    mode = 'submit',
+    course = '',
+    limit = 0,
+    answersPath = '',
+    scalerScope = 'all',
+    scalerClass = '',
+    scalerSubject = '',
+    apiKey = ''
+  } = req.body || {};
 
-  const args = ['main.js', '--bits'];
-  if (mode === 'submit') args.push('--submit');
-  else args.push('--dry-run');
+  const args = ['main.js'];
 
-  if (course) args.push(`--course=${course}`);
-  if (limit > 0) args.push(`--limit=${limit}`);
-  if (answersPath) args.push(`--answers=${answersPath}`);
+  if (platform === 'bits') {
+    args.push('--bits');
+    if (mode === 'submit') args.push('--submit');
+    else args.push('--dry-run');
 
-  broadcastEvent('run_start', { mode, course, limit, args });
+    if (course) args.push(`--course=${course}`);
+    if (limit > 0) args.push(`--limit=${limit}`);
+    if (answersPath) args.push(`--answers=${answersPath}`);
+  } else {
+    // Scaler Academy
+    if (mode === 'submit') args.push('--submit');
+    else args.push('--dry-run');
+
+    if (scalerScope === 'only-mcq') args.push('--only-mcq');
+    else if (scalerScope === 'only-labs') args.push('--only-labs');
+    else if (scalerScope === 'skip-labs') args.push('--skip-labs');
+
+    if (scalerClass) args.push(`--class=${scalerClass}`);
+    if (scalerSubject) args.push(`--subject=${scalerSubject}`);
+  }
+
+  logBuffer.length = 0;
+  reactStepsBuffer.length = 0;
+  broadcastEvent('run_start', { platform, mode, course, limit, args });
+
+  const procEnv = { ...process.env, FORCE_COLOR: '1' };
+  if (apiKey) {
+    procEnv.GEMINI_API_KEYS = apiKey.trim();
+    procEnv.GEMINI_API_KEY = apiKey.trim();
+  }
 
   activeProcess = spawn('node', args, {
     cwd: __dirname,
     shell: true,
     windowsHide: false,
-    env: { ...process.env, FORCE_COLOR: '1' }
+    env: procEnv
   });
 
   activeProcess.stdout.on('data', (chunk) => {
     const text = chunk.toString();
-    broadcastEvent('log', { stream: 'stdout', text });
+    recordLog('stdout', text);
 
     // Parse ReAct events from logs
-    if (text.includes('ReAct Self-Correction')) {
-      broadcastEvent('react_step', { type: 'self_correct', line: text.trim() });
+    if (text.includes('ReAct Self-Correction') || text.includes('ReAct Retry Sweep') || text.includes('Global ReAct Sweep')) {
+      recordReactStep({ type: 'self_correct', line: text.trim() });
     } else if (text.includes('VERIFIED KEY')) {
-      broadcastEvent('react_step', { type: 'ground_truth', line: text.trim() });
+      recordReactStep({ type: 'ground_truth', line: text.trim() });
     } else if (text.includes('Pre-submission audit passed')) {
-      broadcastEvent('react_step', { type: 'audit_pass', line: text.trim() });
+      recordReactStep({ type: 'audit_pass', line: text.trim() });
     }
   });
 
   activeProcess.stderr.on('data', (chunk) => {
-    broadcastEvent('log', { stream: 'stderr', text: chunk.toString() });
+    recordLog('stderr', chunk.toString());
   });
 
   activeProcess.on('close', (code) => {
@@ -228,6 +542,16 @@ app.get('/api/stream', (req, res) => {
   // Send initial ping
   res.write(`event: connected\ndata: ${JSON.stringify({ time: new Date().toISOString() })}\n\n`);
 
+  // Replay buffered logs so refreshing the browser tab mid-flight restores complete terminal history!
+  for (const item of logBuffer) {
+    res.write(`event: log\ndata: ${JSON.stringify(item)}\n\n`);
+  }
+
+  // Replay buffered ReAct steps
+  for (const step of reactStepsBuffer) {
+    res.write(`event: react_step\ndata: ${JSON.stringify(step)}\n\n`);
+  }
+
   req.on('close', () => {
     sseClients.delete(res);
   });
@@ -236,6 +560,20 @@ app.get('/api/stream', (req, res) => {
 // Fallback HTML route
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'ui', 'index.html'));
+});
+
+// Handle Server Errors
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n❌ Port ${PORT} is already in use by another running instance of Mission Control.`);
+    console.error(`👉 You can directly open the existing dashboard at: http://localhost:${PORT}`);
+    console.error(`💡 To kill the lingering process and restart, run in PowerShell:`);
+    console.error(`   Stop-Process -Id (Get-NetTCPConnection -LocalPort ${PORT}).OwningProcess -Force\n`);
+    process.exit(1);
+  } else {
+    console.error(`Server error:`, err);
+    process.exit(1);
+  }
 });
 
 // Start Server

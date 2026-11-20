@@ -23,9 +23,19 @@
       <span class="brand-badge">SOTA v2.0</span>
     </div>
 
-    <div class="status-indicator">
-      <div class="status-dot" id="systemDot"></div>
-      <span id="systemStatusText">Ready / Idle</span>
+    <div style="display: flex; align-items: center; gap: 0.75rem;">
+      <button id="btnOpenSettings" class="btn btn-secondary" style="font-size: 0.8rem; padding: 0.35rem 0.75rem; display: flex; align-items: center; gap: 0.35rem;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        Credentials & Keys
+      </button>
+
+      <div class="status-indicator">
+        <div class="status-dot" id="systemDot"></div>
+        <span id="systemStatusText">Ready / Idle</span>
+      </div>
     </div>
   </header>
 
@@ -78,39 +88,9 @@
 
     <!-- TAB 1: BITS PILANI DEGREE -->
     <section id="tab-courses" class="tab-content active">
-      <!-- Quick Stats -->
-      <div class="stats-grid">
-        <div class="stat-card glass">
-          <div class="stat-info">
-            <h4>Degree Status</h4>
-            <div class="stat-value" style="color: var(--accent-emerald);">All Passed</div>
-          </div>
-          <div class="stat-icon" style="color: var(--accent-emerald);">🎓</div>
-        </div>
-
-        <div class="stat-card glass">
-          <div class="stat-info">
-            <h4>Modern Databases</h4>
-            <div class="stat-value" id="mdbGrade">100%</div>
-          </div>
-          <div class="stat-icon" style="color: var(--accent-emerald);">⚡</div>
-        </div>
-
-        <div class="stat-card glass">
-          <div class="stat-info">
-            <h4>Network Programming</h4>
-            <div class="stat-value" id="npGrade">92.5%</div>
-          </div>
-          <div class="stat-icon" style="color: var(--accent-cyan);">🌐</div>
-        </div>
-
-        <div class="stat-card glass">
-          <div class="stat-info">
-            <h4>ReAct Engine</h4>
-            <div class="stat-value" style="color: var(--accent-blue);">SOTA Active</div>
-          </div>
-          <div class="stat-icon" style="color: var(--accent-blue);">🔁</div>
-        </div>
+      <!-- Quick Stats Grid (Populated dynamically for ALL enrolled subjects) -->
+      <div class="stats-grid" id="statsGridContainer">
+        <!-- Dynamically rendered via app.js for all current degree subjects -->
       </div>
 
       <!-- Execution Control Hub -->
@@ -158,9 +138,17 @@
       <div>
         <div class="section-title">
           <span>Enrolled Degree Courses & Live Quiz Status</span>
-          <button class="btn btn-secondary" id="btnRefreshStatus" style="padding: 0.35rem 0.75rem; font-size: 0.78rem;">
-            🔄 Refresh
-          </button>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <button class="btn btn-secondary" id="btnSyncLiveCourses" style="padding: 0.35rem 0.75rem; font-size: 0.78rem; display: flex; align-items: center; gap: 0.35rem;">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+              </svg>
+              <span>Sync Live Account</span>
+            </button>
+            <button class="btn btn-secondary" id="btnRefreshStatus" style="padding: 0.35rem 0.75rem; font-size: 0.78rem;">
+              🔄 Refresh
+            </button>
+          </div>
         </div>
 
         <div class="course-grid" id="courseCardsContainer">
@@ -185,10 +173,10 @@
             <line x1="12" y1="3" x2="12" y2="15"></line>
           </svg>
         </div>
-        <h3>Drop PDF, JSON, TXT, or MD Answer Keys Here</h3>
-        <p>Supports full quiz answer sheets with scrambled option auto-mapping, checkbox marker stripping, and fuzzy prompt matching.</p>
+        <h3>Drop PDF, Images (PNG/JPG), JSON, TXT, or MD Answer Keys Here</h3>
+        <p>Supports full quiz answer sheets, screenshots & raster PDFs (multimodal Gemini OCR), scrambled option auto-mapping, and fuzzy matching.</p>
         <button class="btn btn-secondary" id="btnBrowse" type="button">Or Click to Browse File</button>
-        <input type="file" id="fileInput" accept=".pdf,.json,.txt,.md" style="display: none;">
+        <input type="file" id="fileInput" accept=".pdf,.json,.txt,.md,.png,.jpg,.jpeg,.webp" style="display: none;">
       </div>
 
       <!-- Indexed Questions List -->
@@ -250,19 +238,68 @@
     <!-- TAB 4: SCALER HUB -->
     <section id="tab-scaler" class="tab-content">
       <div class="section-title">
-        <span>Scaler Automation Extension</span>
-        <span class="badge badge-locked">Extension Ready</span>
+        <span>Scaler Academy Autonomous Solver</span>
+        <span class="badge badge-passed">Operational</span>
       </div>
 
-      <div class="glass" style="padding: 2rem; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 1rem;">
-        <div style="font-size: 2.5rem;">🚀</div>
-        <h3 style="font-size: 1.25rem;">Scaler Labs & MCQ Automation Bridge</h3>
-        <p style="color: var(--text-muted); max-width: 500px; font-size: 0.88rem;">
-          Phase 1 and Phase 2 establish the Universal Ingestion Engine and ReAct loop for BITS Coursera. The same ReAct framework will extend to Scaler problem solving, lab tests, and automated submission in Phase 3.
-        </p>
-        <button class="btn btn-secondary" onclick="alert('Scaler integration configured in main.js. Use node main.js for Scaler runs.')">
-          View Scaler CLI Configuration
-        </button>
+      <!-- Scaler Execution Control Hub -->
+      <div class="control-bar glass">
+        <div class="controls-group">
+          <label style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted);">Mode:</label>
+          <select id="scalerRunMode" class="select-custom">
+            <option value="submit">SUBMIT (Live Solving)</option>
+            <option value="dry-run">DRY-RUN (Preview Only)</option>
+          </select>
+
+          <label style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted);">Assignment Scope:</label>
+          <select id="scalerScope" class="select-custom">
+            <option value="all">All (MCQs + Coding Labs)</option>
+            <option value="only-mcq">Only MCQs (--only-mcq)</option>
+            <option value="only-labs">Only Labs (--only-labs)</option>
+            <option value="skip-labs">Skip Labs (--skip-labs)</option>
+          </select>
+
+          <label style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted);">Class ID (Optional):</label>
+          <input type="text" id="scalerClassInput" class="form-input" placeholder="e.g. 12345" style="width: 140px; padding: 0.45rem 0.65rem;">
+        </div>
+
+        <div class="controls-group">
+          <button id="btnRunScaler" class="btn btn-primary">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            Start Scaler Auto-Solver
+          </button>
+          <button id="btnStopScaler" class="btn btn-danger" style="display: none;">
+            Stop Execution
+          </button>
+        </div>
+      </div>
+
+      <div class="glass" style="padding: 1.5rem; margin-top: 1.25rem;">
+        <h4 style="font-size: 1rem; font-weight: 600; margin-bottom: 0.5rem; color: #fff;">
+          🚀 Scaler Full-Stack Pipeline Capabilities
+        </h4>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-top: 1rem;">
+          <div style="background: rgba(15, 23, 42, 0.6); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-subtle);">
+            <div style="font-weight: 600; color: var(--accent-cyan); margin-bottom: 0.35rem;">MCQ Automated Solving</div>
+            <div style="font-size: 0.82rem; color: var(--text-muted);">
+              Scrapes statement, options, attempt counters, and screenshots. Solves via multi-model pool and clicks the answer.
+            </div>
+          </div>
+          <div style="background: rgba(15, 23, 42, 0.6); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-subtle);">
+            <div style="font-weight: 600; color: var(--accent-emerald); margin-bottom: 0.35rem;">Monaco Coding Lab Injection</div>
+            <div style="font-size: 0.82rem; color: var(--text-muted);">
+              Extracts problem statement, test cases, and starter code. Generates syntax-checked code and injects into the Monaco editor.
+            </div>
+          </div>
+          <div style="background: rgba(15, 23, 42, 0.6); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-subtle);">
+            <div style="font-weight: 600; color: var(--accent-blue); margin-bottom: 0.35rem;">ReAct Self-Correction</div>
+            <div style="font-size: 0.82rem; color: var(--text-muted);">
+              Evaluates execution errors (TLE, WA, Compilation Error), evicts faulty solutions, and retries with targeted failure feedback.
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -285,6 +322,89 @@
         <div class="terminal-body" id="terminalOutput">Connected to Mission Control backend SSE stream. Waiting for job execution...</div>
       </div>
     </section>
+  </main>
+
+  <!-- SETTINGS & CREDENTIALS MODAL -->
+  <div class="modal-backdrop" id="settingsModal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span>⚙️</span>
+          <span>Credentials & AI Configuration</span>
+        </div>
+        <button class="modal-close-btn" id="btnCloseSettings">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 8px; padding: 0.75rem; margin-bottom: 1.25rem;">
+          <div style="font-size: 0.78rem; color: var(--accent-emerald); font-weight: 600;">🔒 100% Local Privacy Guarantee</div>
+          <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.2rem;">
+            Credentials are saved directly to your machine's <code>.env</code> file. No data is ever transmitted to any third-party server.
+          </div>
+        </div>
+
+        <!-- Gemini API Key -->
+        <div class="form-group">
+          <label class="form-label">Google Gemini API Key (BYOK)</label>
+          <div style="display: flex; gap: 0.5rem;">
+            <input type="password" id="inputGeminiKey" class="form-input" placeholder="AIzaSy...">
+            <button class="btn btn-secondary" id="btnToggleGeminiKey" type="button" style="white-space: nowrap; padding: 0.4rem 0.75rem;">Show</button>
+          </div>
+          <div class="form-help">Free API key from <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color: var(--accent-blue);">Google AI Studio</a>.</div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Gemini Model</label>
+          <select id="selectGeminiModel" class="select-custom" style="width: 100%;">
+            <option value="gemini-3.5-flash-lite" selected>Gemini 3.5 Flash-Lite (Recommended - High Quota & Fast)</option>
+            <option value="gemini-3.8-flash">Gemini 3.8 Flash (SOTA Agents & Software Engineering)</option>
+            <option value="gemini-4-hydrogen">Gemini 4 Hydrogen (Flagship 1M Context & Multimodal)</option>
+            <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite (High Limits Fallback)</option>
+            <option value="gemini-2.5-flash">Gemini 2.5 Flash (Deprecated / Auto-reroutes)</option>
+          </select>
+        </div>
+
+        <button class="btn btn-secondary" id="btnTestGeminiKey" type="button" style="width: 100%; margin-bottom: 1.25rem;">
+          ⚡ Test Gemini Connection
+        </button>
+        <div id="testKeyFeedback" style="display: none; padding: 0.6rem; border-radius: 6px; font-size: 0.8rem; margin-bottom: 1rem;"></div>
+
+        <!-- BITS Coursera Credentials -->
+        <div style="border-top: 1px solid var(--border-subtle); padding-top: 1rem; margin-top: 1rem;">
+          <div style="font-size: 0.9rem; font-weight: 600; color: #fff; margin-bottom: 0.75rem;">
+            🎓 BITS Pilani (Coursera) Google Login
+          </div>
+          <div class="form-group">
+            <label class="form-label">Google / BITS Email</label>
+            <input type="email" id="inputBitsEmail" class="form-input" placeholder="2024eb...@online.bits-pilani.ac.in">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Google Password (Optional if already logged in)</label>
+            <input type="password" id="inputBitsPass" class="form-input" placeholder="••••••••••••">
+            <div class="form-help">Leave blank if your browser profile already has saved Google session cookies.</div>
+          </div>
+        </div>
+
+        <!-- Scaler Credentials -->
+        <div style="border-top: 1px solid var(--border-subtle); padding-top: 1rem; margin-top: 1rem;">
+          <div style="font-size: 0.9rem; font-weight: 600; color: #fff; margin-bottom: 0.75rem;">
+            🚀 Scaler Academy Login
+          </div>
+          <div class="form-group">
+            <label class="form-label">Scaler Email</label>
+            <input type="email" id="inputScalerEmail" class="form-input" placeholder="name@email.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Scaler Password</label>
+            <input type="password" id="inputScalerPass" class="form-input" placeholder="••••••••••••">
+          </div>
+        </div>
+
+        <button class="btn btn-primary" id="btnSaveSettings" type="button" style="width: 100%; margin-top: 1.25rem;">
+          💾 Save Configuration
+        </button>
+      </div>
+    </div>
+  </div>
   </main>
 
   <script src="app.js"></script>

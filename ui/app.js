@@ -40,16 +40,23 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderStatus(data) {
+    const btnRunScaler = document.getElementById('btnRunScaler');
+    const btnStopScaler = document.getElementById('btnStopScaler');
+
     if (data.isRunning) {
       systemDot.classList.add('busy');
       systemStatusText.textContent = 'Auto-Solver Running...';
       btnRun.style.display = 'none';
       btnStop.style.display = 'inline-flex';
+      if (btnRunScaler) btnRunScaler.style.display = 'none';
+      if (btnStopScaler) btnStopScaler.style.display = 'inline-flex';
     } else {
       systemDot.classList.remove('busy');
       systemStatusText.textContent = 'Ready / Idle';
       btnRun.style.display = 'inline-flex';
       btnStop.style.display = 'none';
+      if (btnRunScaler) btnRunScaler.style.display = 'inline-flex';
+      if (btnStopScaler) btnStopScaler.style.display = 'none';
     }
 
     if (Array.isArray(data.courses) && courseCardsContainer) {
@@ -64,13 +71,20 @@ document.addEventListener('DOMContentLoaded', () => {
         if (c.grade !== null && c.grade >= 80) {
           badgeHtml = `<span class="badge badge-passed">✓ PASSED (${c.grade}%)</span>`;
           gradeHtml = `<span class="grade-badge">${c.grade}%</span>`;
+        } else if (c.status === 'pass' && c.grade === null) {
+          badgeHtml = `<span class="badge badge-passed">✓ SUBMITTED (100% Solved)</span>`;
+          gradeHtml = `<span class="grade-badge" style="color: var(--accent-emerald);">Submitted</span>`;
         } else if (c.status === 'fail' || (c.grade !== null && c.grade < 80)) {
           badgeHtml = `<span class="badge badge-pending">⚠️ RETAKE REQUIRED (${c.grade}%)</span>`;
           gradeHtml = `<span class="grade-badge" style="color: var(--accent-amber);">${c.grade}%</span>`;
         } else {
-          badgeHtml = `<span class="badge badge-locked">🔒 LOCKED (NOV 1)</span>`;
-          gradeHtml = `<span style="font-size: 0.82rem; color: var(--text-dim);">Opens Nov 1</span>`;
+          badgeHtml = `<span class="badge badge-locked">⏳ PENDING</span>`;
+          gradeHtml = `<span style="font-size: 0.82rem; color: var(--text-dim);">Ready to Solve</span>`;
         }
+
+        const quizLink = c.url
+          ? `<a href="${c.url}" target="_blank" style="color: var(--accent-cyan); text-decoration: none; font-weight: 500;">${escapeHtml(c.currentQuiz)} ↗</a>`
+          : `<span>${escapeHtml(c.currentQuiz)}</span>`;
 
         card.innerHTML = `
           <div>
@@ -79,8 +93,8 @@ document.addEventListener('DOMContentLoaded', () => {
               ${badgeHtml}
             </div>
             <div class="quiz-details">
-              <span><strong>Assignment:</strong> ${escapeHtml(c.currentQuiz)}</span>
-              <span class="quiz-due">📅 Window: Week 4, 5, 6 Graded Assessment</span>
+              <span><strong>Assignment:</strong> ${quizLink}</span>
+              <span class="quiz-due">📊 Tracked attempts: ${c.totalQuizzesAttempted || 1} assessment(s)</span>
             </div>
           </div>
           <div class="course-footer">
@@ -92,14 +106,129 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
 
-    // Update Quick Stats
-    const mdbGradeEl = document.getElementById('mdbGrade');
-    const npGradeEl = document.getElementById('npGrade');
-    const mdbCard = (data.courses || []).find((c) => c.slug.includes('modern-databases'));
-    const npCard = (data.courses || []).find((c) => c.slug.includes('network-programming'));
+    // Render Top Dynamic Quick Stats for ALL enrolled courses
+    const statsGridContainer = document.getElementById('statsGridContainer');
+    if (statsGridContainer && Array.isArray(data.courses)) {
+      statsGridContainer.innerHTML = '';
 
-    if (mdbGradeEl && mdbCard?.grade != null) mdbGradeEl.textContent = `${mdbCard.grade}%`;
-    if (npGradeEl && npCard?.grade != null) npGradeEl.textContent = `${npCard.grade}%`;
+      // 1. Overall Degree Status Card
+      const passedCount = data.courses.filter((c) => c.status === 'pass').length;
+      const totalCount = data.courses.length;
+      const numericGrades = data.courses
+        .map((c) => c.grade)
+        .filter((g) => typeof g === 'number' && !isNaN(g));
+      const avgGrade =
+        numericGrades.length > 0
+          ? (numericGrades.reduce((a, b) => a + b, 0) / numericGrades.length).toFixed(1)
+          : '100';
+
+      const degreeCard = document.createElement('div');
+      degreeCard.className = 'stat-card glass';
+      degreeCard.innerHTML = `
+        <div class="stat-info">
+          <h4>Degree Status</h4>
+          <div class="stat-value" style="color: var(--accent-emerald);">${passedCount}/${totalCount} Passed (${avgGrade}%)</div>
+        </div>
+        <div class="stat-icon" style="color: var(--accent-emerald);">🎓</div>
+      `;
+      statsGridContainer.appendChild(degreeCard);
+
+      // 2. Individual Cards for EVERY enrolled course
+      data.courses.forEach((c) => {
+        const cCard = document.createElement('div');
+        cCard.className = 'stat-card glass';
+
+        let icon = '⚡';
+        let iconColor = 'var(--accent-emerald)';
+        const slug = (c.slug || '').toLowerCase();
+        if (slug.includes('network')) {
+          icon = '🌐';
+          iconColor = 'var(--accent-cyan)';
+        } else if (slug.includes('software') || slug.includes('dev')) {
+          icon = '💻';
+          iconColor = 'var(--accent-purple)';
+        } else if (slug.includes('database') || slug.includes('data')) {
+          icon = '🗄️';
+          iconColor = 'var(--accent-emerald)';
+        }
+
+        let displayVal = 'Pending';
+        let valColor = 'var(--text-dim)';
+        if (c.grade !== null && !isNaN(c.grade)) {
+          displayVal = `${c.grade}%`;
+          valColor = c.grade >= 80 ? 'var(--accent-emerald)' : 'var(--accent-amber)';
+        } else if (c.status === 'pass') {
+          displayVal = '100% (Passed)';
+          valColor = 'var(--accent-emerald)';
+        }
+
+        // Shorten long course names for compact stat header
+        let shortName = c.name;
+        if (shortName.includes('Network Programming')) shortName = 'Network Programming';
+        if (shortName.includes('Software Development Practices')) shortName = 'Software Dev Practices';
+        if (shortName.includes('Modern Databases')) shortName = 'Modern Databases';
+
+        cCard.innerHTML = `
+          <div class="stat-info">
+            <h4 title="${escapeHtml(c.name)}">${escapeHtml(shortName)}</h4>
+            <div class="stat-value" style="color: ${valColor}; font-size: 1.15rem;">${displayVal}</div>
+          </div>
+          <div class="stat-icon" style="color: ${iconColor};">${icon}</div>
+        `;
+        statsGridContainer.appendChild(cCard);
+      });
+
+      // 3. ReAct Loop Status Card
+      const reactCard = document.createElement('div');
+      reactCard.className = 'stat-card glass';
+      reactCard.innerHTML = `
+        <div class="stat-info">
+          <h4>ReAct Loop</h4>
+          <div class="stat-value" style="color: var(--accent-blue);">SOTA Active</div>
+        </div>
+        <div class="stat-icon" style="color: var(--accent-blue);">🔁</div>
+      `;
+      statsGridContainer.appendChild(reactCard);
+    }
+
+    // Dynamically update course filter dropdown options with all enrolled subjects
+    const courseFilter = document.getElementById('courseFilter');
+    if (courseFilter && Array.isArray(data.courses) && data.courses.length > 0) {
+      const currentVal = courseFilter.value;
+      const optionsHtml = ['<option value="">All Pending Deadlines</option>'];
+      data.courses.forEach((c) => {
+        optionsHtml.push(`<option value="${c.slug}">${escapeHtml(c.name)}</option>`);
+      });
+      courseFilter.innerHTML = optionsHtml.join('');
+      if (currentVal) courseFilter.value = currentVal;
+    }
+  }
+
+  // Live Sync Button Handler
+  const btnSyncLiveCourses = document.getElementById('btnSyncLiveCourses');
+  if (btnSyncLiveCourses) {
+    btnSyncLiveCourses.addEventListener('click', async () => {
+      const originalHtml = btnSyncLiveCourses.innerHTML;
+      btnSyncLiveCourses.disabled = true;
+      btnSyncLiveCourses.innerHTML = '<span>⏳ Syncing from Coursera...</span>';
+
+      try {
+        const res = await fetch('/api/sync-courses', { method: 'POST' });
+        const resData = await res.json();
+        if (resData.success) {
+          await fetchStatus();
+          alert(`Successfully synced ${resData.courses?.length || 0} enrolled course(s) from your Coursera degree account!`);
+        } else {
+          alert(`Sync failed: ${resData.error || 'Check terminal logs'}`);
+        }
+      } catch (err) {
+        console.error('Sync request failed:', err);
+        alert(`Sync request failed: ${err.message}`);
+      } finally {
+        btnSyncLiveCourses.disabled = false;
+        btnSyncLiveCourses.innerHTML = originalHtml;
+      }
+    });
   }
 
   // -------------------------------------------------------------
@@ -114,6 +243,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const filterQuestionsInput = document.getElementById('filterQuestionsInput');
 
   let allQuestions = [];
+  let fetchAnswersTimeout = null;
+
+  function scheduleFetchAnswers(delayMs = 150) {
+    clearTimeout(fetchAnswersTimeout);
+    fetchAnswersTimeout = setTimeout(() => {
+      fetchAnswers();
+    }, delayMs);
+  }
 
   async function fetchAnswers() {
     try {
@@ -227,7 +364,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (data.success) {
         alert(`🎉 Ingested ${data.filename}! ${data.questionsParsed} question(s) parsed into ground-truth store.`);
-        await fetchAnswers();
+        scheduleFetchAnswers(50);
       } else {
         alert(`⚠️ Upload error: ${data.error || 'Unknown error'}`);
       }
@@ -288,6 +425,200 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Scaler Runner
+  const btnRunScaler = document.getElementById('btnRunScaler');
+  const btnStopScaler = document.getElementById('btnStopScaler');
+
+  if (btnRunScaler) {
+    btnRunScaler.addEventListener('click', async () => {
+      const mode = document.getElementById('scalerRunMode')?.value || 'submit';
+      const scalerScope = document.getElementById('scalerScope')?.value || 'all';
+      const scalerClass = document.getElementById('scalerClassInput')?.value?.trim() || '';
+
+      try {
+        btnRunScaler.disabled = true;
+        const res = await fetch('/api/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ platform: 'scaler', mode, scalerScope, scalerClass })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert(`Could not start Scaler solver: ${data.error || 'Server error'}`);
+        } else {
+          const termTabBtn = document.querySelector('.tab-btn[data-tab="tab-terminal"]');
+          if (termTabBtn) termTabBtn.click();
+        }
+      } catch (err) {
+        alert(`Failed to trigger Scaler run: ${err.message}`);
+      } finally {
+        btnRunScaler.disabled = false;
+        fetchStatus();
+      }
+    });
+  }
+
+  if (btnStopScaler) {
+    btnStopScaler.addEventListener('click', async () => {
+      if (!confirm('Stop Scaler auto-solver?')) return;
+      try {
+        await fetch('/api/stop', { method: 'POST' });
+      } finally {
+        fetchStatus();
+      }
+    });
+  }
+
+  // -------------------------------------------------------------
+  // SETTINGS & CREDENTIALS MODAL
+  // -------------------------------------------------------------
+  const settingsModal = document.getElementById('settingsModal');
+  const btnOpenSettings = document.getElementById('btnOpenSettings');
+  const btnCloseSettings = document.getElementById('btnCloseSettings');
+  const inputGeminiKey = document.getElementById('inputGeminiKey');
+  const btnToggleGeminiKey = document.getElementById('btnToggleGeminiKey');
+  const selectGeminiModel = document.getElementById('selectGeminiModel');
+  const btnTestGeminiKey = document.getElementById('btnTestGeminiKey');
+  const testKeyFeedback = document.getElementById('testKeyFeedback');
+  const inputBitsEmail = document.getElementById('inputBitsEmail');
+  const inputBitsPass = document.getElementById('inputBitsPass');
+  const inputScalerEmail = document.getElementById('inputScalerEmail');
+  const inputScalerPass = document.getElementById('inputScalerPass');
+  const btnSaveSettings = document.getElementById('btnSaveSettings');
+
+  async function loadSettings() {
+    try {
+      const res = await fetch('/api/settings');
+      if (!res.ok) return;
+      const s = await res.json();
+
+      if (inputGeminiKey && s.geminiKeyMasked) {
+        inputGeminiKey.placeholder = `Saved: ${s.geminiKeyMasked}`;
+      }
+      if (selectGeminiModel && s.geminiModel) {
+        selectGeminiModel.value = s.geminiModel;
+      }
+      if (inputBitsEmail && s.bitsEmail) {
+        inputBitsEmail.value = s.bitsEmail;
+      }
+      if (inputBitsPass && s.hasBitsPass) {
+        inputBitsPass.placeholder = '•••••••••••• (Saved)';
+      }
+      if (inputScalerEmail && s.scalerEmail) {
+        inputScalerEmail.value = s.scalerEmail;
+      }
+      if (inputScalerPass && s.hasScalerPass) {
+        inputScalerPass.placeholder = '•••••••••••• (Saved)';
+      }
+    } catch (err) {
+      console.warn('Could not load settings:', err);
+    }
+  }
+
+  if (btnOpenSettings && settingsModal) {
+    btnOpenSettings.addEventListener('click', () => {
+      loadSettings();
+      settingsModal.classList.add('active');
+    });
+  }
+
+  if (btnCloseSettings && settingsModal) {
+    btnCloseSettings.addEventListener('click', () => {
+      settingsModal.classList.remove('active');
+    });
+  }
+
+  if (settingsModal) {
+    settingsModal.addEventListener('click', (e) => {
+      if (e.target === settingsModal) {
+        settingsModal.classList.remove('active');
+      }
+    });
+  }
+
+  if (btnToggleGeminiKey && inputGeminiKey) {
+    btnToggleGeminiKey.addEventListener('click', () => {
+      const isPass = inputGeminiKey.type === 'password';
+      inputGeminiKey.type = isPass ? 'text' : 'password';
+      btnToggleGeminiKey.textContent = isPass ? 'Hide' : 'Show';
+    });
+  }
+
+  if (btnTestGeminiKey && testKeyFeedback) {
+    btnTestGeminiKey.addEventListener('click', async () => {
+      const apiKey = inputGeminiKey?.value?.trim() || '';
+      const model = selectGeminiModel?.value || 'gemini-2.5-flash';
+
+      testKeyFeedback.style.display = 'block';
+      testKeyFeedback.style.background = 'rgba(59, 130, 246, 0.15)';
+      testKeyFeedback.style.color = '#93c5fd';
+      testKeyFeedback.style.border = '1px solid rgba(59, 130, 246, 0.3)';
+      testKeyFeedback.textContent = '⏳ Testing connection with Google API...';
+
+      try {
+        const res = await fetch('/api/test-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey, model })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          testKeyFeedback.style.background = 'rgba(16, 185, 129, 0.15)';
+          testKeyFeedback.style.color = '#34d399';
+          testKeyFeedback.style.border = '1px solid rgba(16, 185, 129, 0.3)';
+          testKeyFeedback.textContent = `✓ ${data.message}`;
+        } else {
+          testKeyFeedback.style.background = 'rgba(244, 63, 94, 0.15)';
+          testKeyFeedback.style.color = '#f87171';
+          testKeyFeedback.style.border = '1px solid rgba(244, 63, 94, 0.3)';
+          testKeyFeedback.textContent = `⚠️ ${data.message}`;
+        }
+      } catch (err) {
+        testKeyFeedback.style.background = 'rgba(244, 63, 94, 0.15)';
+        testKeyFeedback.style.color = '#f87171';
+        testKeyFeedback.textContent = `⚠️ Connection error: ${err.message}`;
+      }
+    });
+  }
+
+  if (btnSaveSettings) {
+    btnSaveSettings.addEventListener('click', async () => {
+      btnSaveSettings.disabled = true;
+      btnSaveSettings.textContent = 'Saving...';
+
+      try {
+        const payload = {
+          geminiApiKey: inputGeminiKey?.value?.trim() || undefined,
+          geminiModel: selectGeminiModel?.value || undefined,
+          bitsEmail: inputBitsEmail?.value?.trim() || undefined,
+          bitsPassword: inputBitsPass?.value || undefined,
+          scalerEmail: inputScalerEmail?.value?.trim() || undefined,
+          scalerPassword: inputScalerPass?.value || undefined
+        };
+
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+
+        if (res.ok) {
+          alert('✓ Configuration saved to local .env successfully!');
+          if (settingsModal) settingsModal.classList.remove('active');
+        } else {
+          alert(`Save error: ${data.error || 'Server error'}`);
+        }
+      } catch (err) {
+        alert(`Save failed: ${err.message}`);
+      } finally {
+        btnSaveSettings.disabled = false;
+        btnSaveSettings.textContent = '💾 Save Configuration';
+      }
+    });
+  }
+
   const btnRefreshStatus = document.getElementById('btnRefreshStatus');
   if (btnRefreshStatus) {
     btnRefreshStatus.addEventListener('click', fetchStatus);
@@ -308,11 +639,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function initSSE() {
     const evtSource = new EventSource('/api/stream');
+    let hasReceivedLog = false;
+
+    evtSource.addEventListener('connected', () => {
+      // Stream established
+    });
 
     evtSource.addEventListener('log', (e) => {
       try {
         const { text } = JSON.parse(e.data);
         if (terminalOutput) {
+          if (!hasReceivedLog && terminalOutput.textContent.includes('Waiting for job execution')) {
+            terminalOutput.textContent = '';
+            hasReceivedLog = true;
+          }
           terminalOutput.textContent += text;
           terminalOutput.scrollTop = terminalOutput.scrollHeight;
         }
@@ -364,7 +704,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     evtSource.addEventListener('answer_uploaded', () => {
-      fetchAnswers();
+      scheduleFetchAnswers(100);
     });
 
     evtSource.onerror = () => {
