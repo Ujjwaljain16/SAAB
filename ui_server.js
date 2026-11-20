@@ -268,6 +268,43 @@ app.post('/api/sync-courses', async (req, res) => {
   }
 });
 
+// 1.2 Interactive Google SSO Authenticator for Coursera / BITS Pilani
+app.post('/api/auth/bits', async (req, res) => {
+  try {
+    broadcastEvent('log', { stream: 'stdout', text: '[BITS Auth] Opening visible Chrome browser for Coursera / BITS Google login...\n' });
+    const { loginBits } = await import('./bits_auth.js');
+    // Run in background so request returns immediately and user can complete login in Chrome
+    loginBits()
+      .then(() => {
+        broadcastEvent('log', { stream: 'stdout', text: '[BITS Auth] ✓ Coursera login completed and session saved!\n' });
+      })
+      .catch((err) => {
+        broadcastEvent('log', { stream: 'stderr', text: `[BITS Auth] Login error: ${err.message}\n` });
+      });
+    res.json({ success: true, message: 'Chrome window opened for Coursera login. Please sign in and close when finished.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 1.3 Interactive Authenticator for Scaler
+app.post('/api/auth/scaler', async (req, res) => {
+  try {
+    broadcastEvent('log', { stream: 'stdout', text: '[Scaler Auth] Opening visible Chrome browser for Scaler login...\n' });
+    const { login } = await import('./auth.js');
+    login()
+      .then(() => {
+        broadcastEvent('log', { stream: 'stdout', text: '[Scaler Auth] ✓ Scaler login completed and session saved!\n' });
+      })
+      .catch((err) => {
+        broadcastEvent('log', { stream: 'stderr', text: `[Scaler Auth] Login error: ${err.message}\n` });
+      });
+    res.json({ success: true, message: 'Chrome window opened for Scaler login. Please sign in and close when finished.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 2. Get detailed parsed questions from the AnswerStore (cached in-memory)
 app.get('/api/answers', async (req, res) => {
   try {

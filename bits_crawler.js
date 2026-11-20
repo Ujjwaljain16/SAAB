@@ -65,9 +65,15 @@ export async function ensureCourseraLoggedIn(page) {
   // 3. Drive Google OAuth flow inside the target window (popup or main page)
   const authTarget = popup || page;
   console.log('[BITS Auth] Running Google SSO authentication...');
+  let sawGoogleInPopup = false;
   await handleGoogleAuth(authTarget, email, pass, 180000, async (url, p) => {
     if (p.isClosed()) return true;
-    if (url.includes('coursera.org/api/thirdpartyauth') || (!isGoogleUrl(url) && url.includes('coursera.org'))) {
+    if (isGoogleUrl(url)) {
+      sawGoogleInPopup = true;
+      return false;
+    }
+    // Only mark done when Google was actually visited and we redirected back to Coursera
+    if (sawGoogleInPopup && (url.includes('coursera.org/api/thirdpartyauth') || (!isGoogleUrl(url) && url.includes('coursera.org')))) {
       return true;
     }
     return false;
@@ -75,7 +81,7 @@ export async function ensureCourseraLoggedIn(page) {
 
   if (popup && !popup.isClosed()) {
     console.log('[BITS Auth] Waiting for OAuth popup to close...');
-    await popup.waitForEvent('close', { timeout: 10000 }).catch(() => {});
+    await popup.waitForEvent('close', { timeout: 15000 }).catch(() => {});
   }
 
   // 4. Navigate and verify on Degree Dashboard
@@ -88,10 +94,12 @@ export async function ensureCourseraLoggedIn(page) {
   await DELAY(2500);
 
   const verifiedProfile = await page.locator(COURSERA_SEL.userProfile).first().isVisible().catch(() => false);
-  const verifiedHome = page.url().includes('/degrees/bachelor-of-science-computer-science-bits/home');
+  const finalUrl = page.url();
+  const verifiedHome = finalUrl.includes('/degrees/bachelor-of-science-computer-science-bits');
   const verifiedCourses = await page.locator(COURSERA_SEL.currentCoursesHeading).first().isVisible().catch(() => false);
+  const hasCourseLinks = (await page.locator('a[href*="/learn/"]').count()) > 0;
 
-  if (verifiedProfile || verifiedHome || verifiedCourses) {
+  if (verifiedProfile || (verifiedHome && (verifiedCourses || hasCourseLinks))) {
     console.log('✓ Coursera login confirmed!');
   } else {
     console.warn(`⚠️ Warning: Login verification on degree dashboard could not be confirmed automatically. Current URL: ${page.url()}`);
@@ -128,27 +136,30 @@ export async function discoverDegreeDashboard(page, degreeUrl = BITS_URLS.DEGREE
   const dashboardData = await page.evaluate((sel) => {
     const cleanText = (el) => (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
 
-    // 1. Extract Current Enrolled Courses (under "Current courses" heading)
+    // 1. Extract Current Enrolled Courses (under "Current courses" heading or anywhere on dashboard)
     const courses = [];
-    const headings = Array.from(document.querySelectorAll('h2, h3'));
-    const currentCoursesHead = headings.find((h) => cleanText(h) === 'Current courses');
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, [class*="heading"], [class*="title"]'));
+    const currentCoursesHead = headings.find((h) => {
+      const t = cleanText(h).toLowerCase();
+      return t === 'current courses' || t === 'courses' || t === 'my courses' || t.includes('current courses');
+    });
 
     if (currentCoursesHead) {
       let container = currentCoursesHead.parentElement;
       while (container && container !== document.body) {
         const links = Array.from(container.querySelectorAll('a[href*="/learn/"]'));
-        if (links.length >= 2) {
+        if (links.length >= 1) {
           const seen = new Set();
           for (const a of links) {
             const href = a.getAttribute('href') || '';
             const match = href.match(/\/learn\/([^\/\?#]+)/);
             if (!match) continue;
             const slug = match[1];
-            if (seen.has(slug)) continue;
+            if (seen.has(slug) || slug === 'home' || slug === 'search') continue;
             seen.add(slug);
 
             const name = cleanText(a);
-            if (name && name.length > 2 && !name.toLowerCase().includes('view all')) {
+            if (name && name.length > 2 && !name.toLowerCase().includes('view all') && !name.toLowerCase().includes('catalog')) {
               courses.push({
                 name,
                 slug,
@@ -156,9 +167,32 @@ export async function discoverDegreeDashboard(page, degreeUrl = BITS_URLS.DEGREE
               });
             }
           }
-          break;
+          if (courses.length > 0) break;
         }
         container = container.parentElement;
+      }
+    }
+
+    // Fallback: If container search yielded 0 courses, scan all course links on the degree dashboard
+    if (courses.length === 0) {
+      const allCourseLinks = Array.from(document.querySelectorAll('a[href*="/learn/"]'));
+      const seen = new Set();
+      for (const a of allCourseLinks) {
+        const href = a.getAttribute('href') || '';
+        const match = href.match(/\/learn\/([^\/\?#]+)/);
+        if (!match) continue;
+        const slug = match[1];
+        if (seen.has(slug) || slug === 'home' || slug === 'search') continue;
+        seen.add(slug);
+
+        const name = cleanText(a);
+        if (name && name.length > 2 && !name.toLowerCase().includes('view all') && !name.toLowerCase().includes('catalog')) {
+          courses.push({
+            name,
+            slug,
+            url: href.startsWith('http') ? href : `https://www.coursera.org${href}`
+          });
+        }
       }
     }
 

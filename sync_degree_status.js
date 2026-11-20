@@ -77,6 +77,10 @@ export async function syncLiveDegreeStatus(options = {}) {
       completed: dashboard.completed || []
     };
 
+    if (result.courses.length === 0) {
+      console.warn(`[Degree Sync] ⚠️ 0 courses detected. If this is a fresh clone, run "npm run auth:bits" once (or click "Login Coursera" in the UI) to complete Google sign-in in a visible Chrome browser.`);
+    }
+
     fs.writeFileSync(cacheFile, JSON.stringify(result, null, 2), 'utf8');
     console.log(`[Degree Sync] ✓ Successfully synced ${result.courses.length} enrolled courses and ${result.deadlines.length} deadlines.`);
     await ctx.close().catch(() => {});

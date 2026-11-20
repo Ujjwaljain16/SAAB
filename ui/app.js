@@ -217,7 +217,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const resData = await res.json();
         if (resData.success) {
           await fetchStatus();
-          alert(`Successfully synced ${resData.courses?.length || 0} enrolled course(s) from your Coursera degree account!`);
+          if (resData.courses?.length === 0) {
+            alert(`Coursera returned 0 courses. If you haven't logged in yet, click "Login Coursera" above to sign in with Google once in Chrome, then re-sync!`);
+          } else {
+            alert(`Successfully synced ${resData.courses?.length || 0} enrolled course(s) from your Coursera degree account!`);
+          }
         } else {
           alert(`Sync failed: ${resData.error || 'Check terminal logs'}`);
         }
@@ -227,6 +231,32 @@ document.addEventListener('DOMContentLoaded', () => {
       } finally {
         btnSyncLiveCourses.disabled = false;
         btnSyncLiveCourses.innerHTML = originalHtml;
+      }
+    });
+  }
+
+  const btnLoginCoursera = document.getElementById('btnLoginCoursera');
+  if (btnLoginCoursera) {
+    btnLoginCoursera.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/auth/bits', { method: 'POST' });
+        const data = await res.json();
+        alert(data.message || 'Chrome window opened for Coursera login. Please sign in and close it when done.');
+      } catch (err) {
+        alert('Failed to launch Coursera login: ' + err.message);
+      }
+    });
+  }
+
+  const btnLoginScaler = document.getElementById('btnLoginScaler');
+  if (btnLoginScaler) {
+    btnLoginScaler.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/auth/scaler', { method: 'POST' });
+        const data = await res.json();
+        alert(data.message || 'Chrome window opened for Scaler login. Please sign in and close it when done.');
+      } catch (err) {
+        alert('Failed to launch Scaler login: ' + err.message);
       }
     });
   }
