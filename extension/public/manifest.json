@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "SAAB — Academic Workflow Assistant",
+  "version": "2.0.0",
+  "description": "AI-assisted academic workflow, reference matching, and question analysis for BITS Pilani (Coursera) and Scaler Academy.",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://*.coursera.org/*",
+    "https://*.scaler.com/*",
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.coursera.org/*",
+        "https://*.scaler.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "data/bundled-references.json",
+        "icons/*"
+      ],
+      "matches": [
+        "https://*.coursera.org/*",
+        "https://*.scaler.com/*"
+      ]
+    }
+  ]
+}

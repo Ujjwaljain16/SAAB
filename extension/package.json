@@ -1,0 +1,28 @@
+{
+  "name": "saab-academic-assistant",
+  "version": "2.0.0",
+  "description": "AI-Assisted Academic Workflow Extension for BITS Pilani (Coursera) and Scaler Academy",
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "tsc && vite build && vite build --config vite.content.config.ts && node scripts/copy-manifest.js",
+    "package:zip": "powershell -Command \"Compress-Archive -Path dist/* -DestinationPath saab-extension-v2.0.0.zip -Force\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.280",
+    "@types/node": "^22.7.5",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.2",
+    "happy-dom": "^21.0.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.8",
+    "vitest": "^2.1.2"
+  }
+}
