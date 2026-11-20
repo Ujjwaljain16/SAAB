@@ -1,0 +1,62 @@
+[
+  {
+    "prompt": "Which of the following best defines a defect in software testing?",
+    "correctAnswers": [
+      "A deviation from expected software behavior"
+    ]
+  },
+  {
+    "prompt": "What is the primary goal of acceptance testing?",
+    "correctAnswers": [
+      "To ensure the software meets business requirements and is ready for deployment"
+    ]
+  },
+  {
+    "prompt": "In which scenario is black-box testing most suitable?",
+    "correctAnswers": [
+      "Validating the software's behavior against its specifications"
+    ]
+  },
+  {
+    "prompt": "What is the role of assertions in software testing?",
+    "correctAnswers": [
+      "To validate the expected outcomes of test cases"
+    ]
+  },
+  {
+    "prompt": "Why is it important to log detailed error messages during debugging?",
+    "correctAnswers": [
+      "To provide sufficient context for identifying the root cause of issues"
+    ]
+  },
+  {
+    "prompt": "How does Docker optimize resource usage compared to virtual machines?",
+    "correctAnswers": [
+      "By sharing the host OS kernel across containers."
+    ]
+  },
+  {
+    "prompt": "Which property of virtual machines allows them to run independently without affecting others?",
+    "correctAnswers": [
+      "Isolation"
+    ]
+  },
+  {
+    "prompt": "What is a Docker Container?",
+    "correctAnswers": [
+      "A running instance of a Docker Image."
+    ]
+  },
+  {
+    "prompt": "Where are Docker Images typically stored?",
+    "correctAnswers": [
+      "In a Docker Registry like Docker Hub."
+    ]
+  },
+  {
+    "prompt": "Which of the following best describes Docker Hub's role in the Docker ecosystem?",
+    "correctAnswers": [
+      "A repository for hosting, sharing, and managing Docker images."
+    ]
+  }
+]

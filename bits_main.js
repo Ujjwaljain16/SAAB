@@ -56,7 +56,7 @@ export async function runBits(options = {}) {
   fs.mkdirSync(userDataDir, { recursive: true });
 
   console.log(`[BITS] 🌐 Launching visible Chrome browser window (headed mode)...`);
-  const ctx = await chromium.launchPersistentContext(userDataDir, {
+  const launchOptions = {
     headless: false,
     channel: 'chrome',
     permissions: ['clipboard-read', 'clipboard-write'],
@@ -71,7 +71,34 @@ export async function runBits(options = {}) {
       '--no-default-browser-check'
     ],
     viewport: null
-  });
+  };
+
+  let ctx;
+  try {
+    ctx = await chromium.launchPersistentContext(userDataDir, launchOptions);
+  } catch (launchErr) {
+    if (launchErr.message && launchErr.message.includes('ProcessSingleton')) {
+      console.warn(`[BITS] ⚠️ Stale Chrome lock detected in profile directory. Cleaning up lingering Chrome processes...`);
+      if (process.platform === 'win32') {
+        try {
+          const { execSync } = await import('child_process');
+          execSync(
+            `powershell -Command "Get-CimInstance Win32_Process -Filter \\"name = 'chrome.exe'\\" | Where-Object { $_.CommandLine -like '*temp_chrome_profile_bits*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"`,
+            { stdio: 'ignore' }
+          );
+        } catch {}
+      }
+      try {
+        const lockfilePath = path.join(userDataDir, 'lockfile');
+        if (fs.existsSync(lockfilePath)) fs.unlinkSync(lockfilePath);
+      } catch {}
+      await DELAY(1200);
+      console.log(`[BITS] Retrying browser launch...`);
+      ctx = await chromium.launchPersistentContext(userDataDir, launchOptions);
+    } else {
+      throw launchErr;
+    }
+  }
 
   // Optimize traffic by blocking analytics/ads
   await ctx.route('**/*', (route) => {
@@ -156,17 +183,20 @@ export async function runBits(options = {}) {
           const mark = res.status === 'pass' ? '✓' : (res.status === 'dry-run' ? '↺' : '⚠️');
           console.log(`  ${mark} Finished: "${assignment.title}" [${res.status}]`);
 
-          // Early-halt boundary: If this quiz is not live yet / locked for a future date,
-          // ALL subsequent quizzes in the chronological feed are also future/not live. Break immediately!
+          // If this quiz is not live yet / locked for a future calendar date:
           if (res.isFutureLocked) {
-            console.log(`\n============================================================`);
-            console.log(`🛑 [BITS] Halting scan at first unavailable/future quiz:`);
-            console.log(`   Assignment: "${assignment.title}"`);
-            console.log(`   Course:     ${assignment.course}`);
-            console.log(`   Status:     ${res.reason || 'Not live yet / unavailable'}`);
-            console.log(`   Remaining deadlines in queue are future-locked. Halting run.`);
-            console.log(`============================================================\n`);
-            break;
+            console.log(`  ℹ️ Assignment "${assignment.title}" (${assignment.course}) is future-locked (${res.reason || 'Not live yet'}).`);
+            // Check if there are remaining assignments from other courses in the queue
+            const remainingDifferentCourse = targetDeadlines.slice(i + 1).some(a => a.course !== assignment.course);
+            if (remainingDifferentCourse) {
+              console.log(`  ℹ️ Remaining items exist for other courses in deadline queue. Continuing queue traversal...`);
+              continue;
+            } else {
+              console.log(`\n============================================================`);
+              console.log(`🛑 [BITS] Halting scan: Remaining deadlines for this course are future-locked.`);
+              console.log(`============================================================\n`);
+              break;
+            }
           }
         } catch (err) {
           console.error(`  ✗ Error solving "${assignment.title}":`, err.message);

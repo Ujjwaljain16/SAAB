@@ -1,0 +1,77 @@
+[
+  {
+    "prompt": "A company stores structured sales data along with customer reviews, images, and other unstructured data. It wants an architecture that can work with both types of data. Which concepts are relevant?",
+    "correctAnswers": [
+      "Data warehousing",
+      "Data Lake",
+      "Lakehouse architecture"
+    ]
+  },
+  {
+    "prompt": "A data engineering team is comparing a traditional data warehouse with a lakehouse. Which aspects should they consider?",
+    "correctAnswers": [
+      "Whether the system can support analytical workloads",
+      "Data storage and analytics architecture",
+      "Data types supported"
+    ]
+  },
+  {
+    "prompt": "An organization is exploring modern platforms for data warehousing and lakehouse implementations. Which technologies are included in the course?",
+    "correctAnswers": [
+      "Databricks",
+      "Snowflake"
+    ]
+  },
+  {
+    "prompt": "Which are characteristics or concepts associated with data warehouses?",
+    "correctAnswers": [
+      "Structured data",
+      "Analytical workloads",
+      "Historical data analysis"
+    ]
+  },
+  {
+    "prompt": "What is the primary purpose of integrating a database with an external application?",
+    "correctAnswers": [
+      "Allow the application to store and retrieve application data"
+    ]
+  },
+  {
+    "prompt": "A developer is creating a REST-based application using MongoDB. Which elements are relevant?",
+    "correctAnswers": [
+      "Spring Boot",
+      "REST interface",
+      "MongoDB database"
+    ]
+  },
+  {
+    "prompt": "An application team wants to decide how a database should be connected to an external application. Which factors are relevant during application development?",
+    "correctAnswers": [
+      "Application use case",
+      "Technology stack",
+      "Design principles"
+    ]
+  },
+  {
+    "prompt": "A company is building an analytics platform that receives structured transaction records and unstructured customer content. Which considerations are relevant?",
+    "correctAnswers": [
+      "Integrating structured data",
+      "Integrating unstructured data",
+      "Lakehouse architecture"
+    ]
+  },
+  {
+    "prompt": "Which statements describe a data lake?",
+    "correctAnswers": [
+      "Provides flexibility for diverse data",
+      "Can store different types of data",
+      "Supports storage of raw data"
+    ]
+  },
+  {
+    "prompt": "What is the main purpose of a data warehouse?",
+    "correctAnswers": [
+      "Analytical data processing"
+    ]
+  }
+]

@@ -2,6 +2,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import 'dotenv/config';
 
 /**
  * Normalizes text for robust semantic comparison (strips punctuation, trims, lowercases)
@@ -129,6 +131,7 @@ export class AnswerStore {
     if (ext === '.json') {
       try {
         const content = JSON.parse(fs.readFileSync(absPath, 'utf8'));
+        const newItems = [];
         if (Array.isArray(content)) {
           for (const item of content) {
             const prompt = item.prompt || item.question || item.title || '';
@@ -138,7 +141,7 @@ export class AnswerStore {
               ? item.correctAnswers
               : [item.answer || item.correct || ''];
             if (prompt) {
-              this.entries.push({
+              newItems.push({
                 prompt,
                 correctAnswers: answers.filter(Boolean).map(String),
                 source: fileName
@@ -147,54 +150,207 @@ export class AnswerStore {
           }
         } else if (typeof content === 'object') {
           for (const [q, a] of Object.entries(content)) {
-            this.entries.push({
+            newItems.push({
               prompt: q,
               correctAnswers: Array.isArray(a) ? a.map(String) : [String(a)],
               source: fileName
             });
           }
         }
-        console.log(`[Answer Store] Loaded ${this.entries.length} question(s) from JSON: ${fileName}`);
+        this.entries = this.entries.filter((e) => e.source !== fileName);
+        this.entries.push(...newItems);
+        console.log(`[Answer Store] Loaded ${newItems.length} question(s) from JSON: ${fileName}`);
       } catch (err) {
         console.error(`[Answer Store] Failed to parse JSON answer key: ${err.message}`);
       }
     } else if (ext === '.pdf') {
       try {
-        const pdfParseModule = await import('pdf-parse');
         const dataBuffer = fs.readFileSync(absPath);
         let rawText = '';
 
-        if (typeof pdfParseModule.default === 'function') {
-          const res = await pdfParseModule.default(dataBuffer);
-          rawText = res.text || '';
-        } else if (pdfParseModule.PDFParse) {
-          const uint8 = new Uint8Array(dataBuffer);
-          const parser = new pdfParseModule.PDFParse(uint8);
-          await parser.load();
-          const res = await parser.getText();
-          rawText = res?.text || (typeof res === 'string' ? res : '');
-        } else if (typeof pdfParseModule === 'function') {
-          const res = await pdfParseModule(dataBuffer);
-          rawText = res.text || '';
+        try {
+          const pdfParseModule = await import('pdf-parse');
+          if (typeof pdfParseModule.default === 'function') {
+            const res = await pdfParseModule.default(dataBuffer);
+            rawText = res.text || '';
+          } else if (pdfParseModule.PDFParse) {
+            const uint8 = new Uint8Array(dataBuffer);
+            const parser = new pdfParseModule.PDFParse(uint8);
+            await parser.load();
+            const res = await parser.getText();
+            rawText = res?.text || (typeof res === 'string' ? res : '');
+          } else if (typeof pdfParseModule === 'function') {
+            const res = await pdfParseModule(dataBuffer);
+            rawText = res.text || '';
+          }
+        } catch (pdfErr) {
+          console.warn(`[Answer Store] Local PDF text extraction skipped for ${fileName}: ${pdfErr.message}`);
         }
 
-        const parsedItems = parseQuizText(rawText, fileName);
+        let parsedItems = parseQuizText(rawText, fileName);
+
+        // Fallback: If 0 questions parsed (raster / screenshot PDF without text stream), use Gemini Multimodal OCR
+        if (parsedItems.length === 0) {
+          parsedItems = await this.extractWithGeminiVision(absPath, dataBuffer, fileName, 'application/pdf');
+        }
+
+        this.entries = this.entries.filter((e) => e.source !== fileName);
         this.entries.push(...parsedItems);
-        console.log(`[Answer Store] Extracted ${parsedItems.length} answer-key question(s) from PDF: ${fileName}`);
+        console.log(`[Answer Store] Indexed ${parsedItems.length} answer-key question(s) from PDF: ${fileName}`);
       } catch (err) {
         console.error(`[Answer Store] Failed to read PDF ${fileName}: ${err.message}`);
+      }
+    } else if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
+      // Direct image / screenshot ingestion via Gemini Vision
+      try {
+        const dataBuffer = fs.readFileSync(absPath);
+        const mimeType = ext === '.png' ? 'image/png' : (ext === '.webp' ? 'image/webp' : 'image/jpeg');
+        const parsedItems = await this.extractWithGeminiVision(absPath, dataBuffer, fileName, mimeType);
+        this.entries = this.entries.filter((e) => e.source !== fileName);
+        this.entries.push(...parsedItems);
+        console.log(`[Answer Store] Indexed ${parsedItems.length} answer-key question(s) from Image: ${fileName}`);
+      } catch (err) {
+        console.error(`[Answer Store] Failed to read image ${fileName}: ${err.message}`);
       }
     } else {
       // Plain text or markdown
       try {
         const rawText = fs.readFileSync(absPath, 'utf8');
         const parsedItems = parseQuizText(rawText, fileName);
+        this.entries = this.entries.filter((e) => e.source !== fileName);
         this.entries.push(...parsedItems);
         console.log(`[Answer Store] Extracted ${parsedItems.length} answer-key question(s) from TXT: ${fileName}`);
       } catch (err) {
         console.error(`[Answer Store] Failed to read text file ${fileName}: ${err.message}`);
       }
     }
+  }
+
+  /**
+   * Multimodal Gemini OCR fallback for screenshot / image PDFs and image files
+   * Caches results to disk (.solver-cache/pdf-ocr) by SHA256 hash.
+   * @param {string} absPath
+   * @param {Buffer} dataBuffer
+   * @param {string} fileName
+   * @param {string} [mimeType='application/pdf']
+   * @returns {Promise<Array<{ prompt: string, correctAnswers: Array<string>, source: string }>>}
+   */
+  async extractWithGeminiVision(absPath, dataBuffer, fileName, mimeType = 'application/pdf') {
+    const CACHE_DIR = path.resolve('.solver-cache', 'pdf-ocr');
+    if (!fs.existsSync(CACHE_DIR)) {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+    }
+
+    const fileHash = crypto.createHash('sha256').update(dataBuffer).digest('hex').slice(0, 16);
+    const cacheFile = path.join(CACHE_DIR, `${fileHash}.json`);
+
+    if (fs.existsSync(cacheFile)) {
+      try {
+        const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+        if (Array.isArray(cached) && cached.length > 0) {
+          console.log(`[Answer Store] (OCR Cache Hit) Loaded ${cached.length} question(s) for ${fileName}`);
+          return cached.map((item) => ({
+            prompt: String(item.prompt || '').trim(),
+            correctAnswers: Array.isArray(item.correctAnswers)
+              ? item.correctAnswers.map(String)
+              : [String(item.correctAnswers || '')].filter(Boolean),
+            source: fileName
+          }));
+        }
+      } catch {
+        // Corrupt cache file, re-query
+      }
+    }
+
+    const rawKeys = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '';
+    const keys = rawKeys
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean);
+
+    if (keys.length === 0) {
+      console.warn(`[Answer Store] File "${fileName}" has no text stream and GEMINI_API_KEY is not set for OCR fallback.`);
+      return [];
+    }
+
+    console.log(`[Answer Store] Running Gemini Multimodal extraction on "${fileName}"...`);
+
+    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+
+    for (const key of keys) {
+      try {
+        const { GoogleGenerativeAI } = await import('@google/generative-ai');
+        const genAI = new GoogleGenerativeAI(key);
+        const model = genAI.getGenerativeModel({ model: modelName });
+
+        const promptText =
+          'Extract all quiz questions with their correct marked answers from this document. ' +
+          'Return ONLY a valid JSON array of objects with keys: ' +
+          '"prompt" (exact question text as a string) and "correctAnswers" (array of strings containing the exact text of correct/selected options). ' +
+          'Format: [ { "prompt": "...", "correctAnswers": ["..."] } ] ' +
+          'Do NOT wrap output in markdown fences or commentary.';
+
+        const response = await model.generateContent([
+          {
+            inlineData: {
+              data: dataBuffer.toString('base64'),
+              mimeType
+            }
+          },
+          promptText
+        ]);
+
+        let text = response.response.text().trim();
+        let parsed = null;
+        try {
+          const firstBrace = text.indexOf('{');
+          const firstBracket = text.indexOf('[');
+          let startIdx = -1;
+          let endIdx = -1;
+          if (firstBracket !== -1 && (firstBrace === -1 || firstBracket < firstBrace)) {
+            startIdx = firstBracket;
+            endIdx = text.lastIndexOf(']');
+          } else if (firstBrace !== -1) {
+            startIdx = firstBrace;
+            endIdx = text.lastIndexOf('}');
+          }
+          if (startIdx !== -1 && endIdx > startIdx) {
+            parsed = JSON.parse(text.slice(startIdx, endIdx + 1));
+          }
+        } catch {
+          parsed = null;
+        }
+
+        const rawList = Array.isArray(parsed)
+          ? parsed
+          : (Array.isArray(parsed?.questions) ? parsed.questions : (Array.isArray(parsed?.entries) ? parsed.entries : []));
+
+        if (rawList.length > 0) {
+          const items = rawList
+            .map((item) => ({
+              prompt: String(item.prompt || item.question || '').trim(),
+              correctAnswers: Array.isArray(item.correctAnswers)
+                ? item.correctAnswers.map(String)
+                : (Array.isArray(item.answers) ? item.answers.map(String) : [String(item.correctAnswer || item.answer || '')].filter(Boolean)),
+              source: fileName
+            }))
+            .filter((item) => item.prompt.length > 3 || item.correctAnswers.length > 0);
+
+          try {
+            fs.writeFileSync(cacheFile, JSON.stringify(items, null, 2), 'utf8');
+          } catch (err) {
+            console.warn(`[Answer Store] Failed to save OCR cache: ${err.message}`);
+          }
+
+          console.log(`[Answer Store] Gemini OCR extracted ${items.length} question(s) from "${fileName}"`);
+          return items;
+        }
+      } catch (err) {
+        console.warn(`[Answer Store] Gemini OCR attempt failed for ${fileName}: ${err.message}`);
+      }
+    }
+
+    return [];
   }
 
   /**
@@ -207,7 +363,7 @@ export class AnswerStore {
     const files = fs.readdirSync(absDir);
     for (const file of files) {
       const full = path.join(absDir, file);
-      if (fs.statSync(full).isFile() && /\.(pdf|json|txt|md)$/i.test(file)) {
+      if (fs.statSync(full).isFile() && /\.(pdf|json|txt|md|png|jpg|jpeg|webp)$/i.test(file)) {
         await this.loadFile(full);
       }
     }
@@ -235,8 +391,31 @@ export class AnswerStore {
       }
     }
 
-    // Require high threshold for prompt match (>= 0.72)
+    // Fallback: If prompt match was low, check if any entry has a correct answer matching live options directly
     if (bestScore < 0.72 || !bestEntry) {
+      for (const entry of this.entries) {
+        const optionMatches = [];
+        for (const rawAns of entry.correctAnswers) {
+          for (const opt of liveQuestion.options) {
+            const optSim = computeTextSimilarity(opt.text, rawAns);
+            if (optSim >= 0.82) {
+              optionMatches.push(opt.index);
+            }
+          }
+        }
+        if (optionMatches.length > 0) {
+          const uniquePicks = Array.from(new Set(optionMatches));
+          const finalPicks = liveQuestion.isMultiSelect ? uniquePicks : [uniquePicks[0]];
+          return {
+            matched: true,
+            selectedIndices: finalPicks,
+            bestOptionIndex: finalPicks[0],
+            confidence: 0.95,
+            source: entry.source,
+            reasoning: `Verified option match from key "${entry.source}": ${finalPicks.map(i => liveQuestion.options[i]?.text).join(', ')}`
+          };
+        }
+      }
       return null;
     }
 

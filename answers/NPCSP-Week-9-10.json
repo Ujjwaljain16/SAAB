@@ -1,0 +1,63 @@
+[
+  {
+    "prompt": "connect function TCP client node net",
+    "correctAnswers": [
+      "net.connect()"
+    ]
+  },
+  {
+    "prompt": "UDP connectionless delivery",
+    "correctAnswers": [
+      "UDP is connectionless and does not guarantee delivery."
+    ]
+  },
+  {
+    "prompt": "real time video streaming protocol use case",
+    "correctAnswers": [
+      "Real-time video streaming"
+    ]
+  },
+  {
+    "prompt": "SCTP multi-homing multi-streaming",
+    "correctAnswers": [
+      "SCTP supports multi-homing and multi-streaming."
+    ]
+  },
+  {
+    "prompt": "ApacheBench ab wrk web server benchmarking tool",
+    "correctAnswers": [
+      "ApacheBench (ab)",
+      "wrk"
+    ]
+  },
+  {
+    "prompt": "concurrent server architecture handles multiple clients",
+    "correctAnswers": [
+      "Concurrent Server"
+    ]
+  },
+  {
+    "prompt": "default HTTP port number",
+    "correctAnswers": [
+      "80"
+    ]
+  },
+  {
+    "prompt": "Telnet remote terminal FTP transfers files difference",
+    "correctAnswers": [
+      "Telnet provides remote terminal access, while FTP transfers files."
+    ]
+  },
+  {
+    "prompt": "Asynchronous I/O model non-blocking",
+    "correctAnswers": [
+      "Asynchronous I/O"
+    ]
+  },
+  {
+    "prompt": "blocking write call wait return process buffer full",
+    "correctAnswers": [
+      "The process waits or the write call returns later."
+    ]
+  }
+]

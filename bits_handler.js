@@ -229,13 +229,25 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
 
         // Grade detection: look for actual student grade, NEVER match the passing requirement threshold "80% or higher to pass"
         const gradeMatch = text.match(/(?:your\s+)?grade[:\s]*(\d+(?:\.\d+)?)\s*%(?!\s*(?:or higher|to pass))/i) ||
+                           text.match(/(?:passed|congratulations|latest attempt|highest grade)[^\d\n]*(\d+(?:\.\d+)?)\s*%/i) ||
                            text.match(/grade[:\s]*(\d+(?:\.\d+)?)(?!\s*(?:or higher|to pass|\s*points?))/i) ||
-                           text.match(/(\d+(?:\.\d+)?)\s*\/\s*100/i);
-        const currentGrade = gradeMatch ? Math.round(parseFloat(gradeMatch[1])) : null;
-        return { attemptsUsed, attemptsTotal, currentGrade, rawText: text.slice(0, 400) };
-      }).catch(() => ({ attemptsUsed: null, attemptsTotal: null, currentGrade: null }));
+                           text.match(/(\d+(?:\.\d+)?)\s*\/\s*100/i) ||
+                           text.match(/(\d+(?:\.\d+)?)\s*\/\s*(\d+)\s*(?:points|pts)/i);
+        let currentGrade = null;
+        if (gradeMatch) {
+          if (gradeMatch[2]) {
+            const earned = parseFloat(gradeMatch[1]);
+            const total = parseFloat(gradeMatch[2]);
+            if (total > 0) currentGrade = Math.round((earned / total) * 100);
+          } else {
+            currentGrade = Math.round(parseFloat(gradeMatch[1]));
+          }
+        }
+        const isPassedBadge = /(?:you(?:'ve)?\s+)?passed|congratulations/i.test(text) && !/did not pass/i.test(text);
+        return { attemptsUsed, attemptsTotal, currentGrade, isPassedBadge, rawText: text.slice(0, 400) };
+      }).catch(() => ({ attemptsUsed: null, attemptsTotal: null, currentGrade: null, isPassedBadge: false }));
 
-      const { attemptsUsed, attemptsTotal, currentGrade } = coverMeta;
+      const { attemptsUsed, attemptsTotal, currentGrade, isPassedBadge } = coverMeta;
       const attemptsRemaining = (attemptsTotal != null && attemptsUsed != null) ? attemptsTotal - attemptsUsed : null;
 
       if (attemptsUsed !== null) {
@@ -245,11 +257,12 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
         console.log(`[BITS Handler] 📊 Current grade on record: ${currentGrade}%`);
       }
 
-      // If already passing (>= 80%) and not in dry-run, skip re-submission
-      if (!options.dryRun && currentGrade !== null && currentGrade >= 80) {
-        console.log(`[BITS Handler] ✅ Already passing with ${currentGrade}% — no re-submission needed.`);
-        markQuizPassed(assignmentUrl, { grade: currentGrade });
-        return { status: 'skipped', reason: `Already passing (${currentGrade}% >= 80%)`, grade: currentGrade };
+      // If already passing (>= 80%) or passed badge detected, and not in dry-run, mark passed
+      if (!options.dryRun && ((currentGrade !== null && currentGrade >= 80) || isPassedBadge)) {
+        const gradeToRecord = currentGrade ?? 100;
+        console.log(`[BITS Handler] ✅ Already passed on Coursera (${gradeToRecord}%) — no re-submission needed.`);
+        markQuizPassed(assignmentUrl, { grade: gradeToRecord });
+        return { status: 'pass', reason: `Already passing (${gradeToRecord}%)`, grade: gradeToRecord };
       }
 
       // If 0 attempts remain, stop immediately
@@ -326,8 +339,8 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
                          (await launchBtn.getAttribute('disabled').catch(() => null)) !== null;
 
       if (isDisabled) {
-        console.log(`[BITS Handler] ⚠️ Cover action button "${btnText}" is disabled. (0 attempts or locked).`);
-        return { status: 'skipped', reason: 'Assignment start button is disabled', isFutureLocked: true };
+        console.log(`[BITS Handler] ⚠️ Cover action button "${btnText}" is disabled (cooldown, 0 attempts remaining, or locked).`);
+        return { status: 'skipped', reason: `Assignment button "${btnText}" is disabled`, isFutureLocked: false };
       }
 
       console.log(`[BITS Handler] Launch/action element detected: "${btnText}"`);
@@ -853,6 +866,8 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
 
       // Match percentage or points: e.g. "Grade: 80%", "Your grade: 100%", "8 / 10 points", "Grade: 92.5%"
       const gradeMatch = text.match(/(?:your\s+)?grade[:\s]*(\d+(?:\.\d+)?)\s*%(?!\s*(?:or higher|to pass))/i) ||
+                         text.match(/(?:passed|congratulations)[^\d\n]*(\d+(?:\.\d+)?)\s*%/i) ||
+                         text.match(/(\d+(?:\.\d+)?)\s*%\s*(?:achieved|earned|grade)/i) ||
                          text.match(/grade[:\s]*(\d+(?:\.\d+)?)(?!\s*(?:or higher|to pass|\s*points?))/i) ||
                          text.match(/(\d+(?:\.\d+)?)\s*\/\s*100/i) ||
                          text.match(/(\d+(?:\.\d+)?)\s*\/\s*(\d+)\s*(?:points|pts)/i);
@@ -867,7 +882,9 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
         }
       }
 
-      const isPassed = /passed|congratulations/i.test(text) && !/did not pass|try again/i.test(text);
+      const hasPassedSignal = /(?:you(?:'ve)?\s+)?passed|congratulations|passing grade/i.test(text);
+      const hasFailedSignal = /did not pass|failed to pass|try again to pass/i.test(text);
+      const isPassed = hasPassedSignal && !hasFailedSignal;
 
       // Scrape question review cards if review is visible
       const wrongQuestionIndices = [];
@@ -886,17 +903,22 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
         }
       }
 
-      return { gradePercent, isPassed, wrongQuestionIndices };
+      return { gradePercent, isPassed, hasFailedSignal, wrongQuestionIndices };
     }).catch(() => null);
 
-    if (postSubmitData && (postSubmitData.gradePercent !== null || postSubmitData.wrongQuestionIndices.length > 0)) {
+    if (postSubmitData && (postSubmitData.gradePercent !== null || postSubmitData.wrongQuestionIndices.length > 0 || postSubmitData.isPassed)) {
       break;
     }
     await DELAY(2500);
   }
 
   const finalGrade = postSubmitData?.gradePercent ?? null;
-  const isPassingGrade = finalGrade !== null ? finalGrade >= 80 : (postSubmitData?.isPassed ?? true);
+  // Passing condition:
+  // 1. If finalGrade is known, must be >= 80%
+  // 2. If finalGrade is null (grading pending), pass IF positive signal OR zero wrong questions without failure text
+  const isPassingGrade = finalGrade !== null
+    ? finalGrade >= 80
+    : (postSubmitData?.isPassed || (postSubmitData?.wrongQuestionIndices?.length === 0 && !postSubmitData?.hasFailedSignal));
 
   console.log(`\n============================================================`);
   console.log(`[BITS Handler] 📊 Post-Submission Verification:`);
