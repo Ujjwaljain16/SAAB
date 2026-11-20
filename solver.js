@@ -66,7 +66,7 @@ const CLIENTS = API_KEYS.map((k) => new GoogleGenerativeAI(k));
 // own requests-per-minute and requests-per-day. GEMINI_MODELS=a,b,c lists them in priority order (GEMINI_MODEL, a single name, still
 // works). A "slot" is one (model, key) pair: slots are ordered by model priority, then key, and each has its own limiter and persisted
 // daily budget. Selection prefers the first model that has capacity right now and spills over to the next one automatically.
-const GEMINI_MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite')
+const GEMINI_MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite')
   .split(',')
   .map((m) => m.trim())
   .filter(Boolean);
@@ -78,14 +78,15 @@ for (const model of GEMINI_MODELS) {
 // Free-tier limits read from a real AI Studio dashboard (requests per minute / per day). Unknown models fall back to a conservative
 // guess. Override or extend with GEMINI_LIMITS="model=rpm/rpd,model2=rpm/rpd" (or GEMINI_RPM / GEMINI_RPD for every model).
 const KNOWN_GEMINI_LIMITS = {
+  'gemini-3.5-flash-lite': { rpm: 30, rpd: 1500 },
+  'gemini-3.8-flash': { rpm: 15, rpd: 500 },
+  'gemini-4-hydrogen': { rpm: 15, rpd: 500 },
+  'gemini-3.1-flash-lite': { rpm: 30, rpd: 1500 },
   'gemini-2.5-flash': { rpm: 5, rpd: 20 },
   'gemini-3-flash-preview': { rpm: 5, rpd: 20 },
   'gemini-3.5-flash': { rpm: 5, rpd: 20 },
   'gemini-3.6-flash': { rpm: 5, rpd: 20 },
   'gemini-3.7-flash': { rpm: 5, rpd: 20 },
-  'gemini-3.8-flash': { rpm: 5, rpd: 20 },
-  'gemini-3.1-flash-lite': { rpm: 15, rpd: 500 },
-  'gemini-3.5-flash-lite': { rpm: 15, rpd: 500 },
   'gemma-4-26b-a4b-it': { rpm: 30, rpd: 14400 },
   'gemma-4-31b-it': { rpm: 30, rpd: 14400 }
 };
@@ -1264,16 +1265,19 @@ ${exampleOutput}`;
 
   // Fallback to Groq / Grok if available (text-only questions)
   if (!screenshot64) {
-    const candidateGroqModels = Array.from(new Set([
-      ...GROQ_MODELS,
-      GROQ_MODEL,
-      'openai/gpt-oss-120b',
-      'qwen/qwen3.8-27b',
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant'
-    ])).filter((m) => Boolean(m) && !deadGroqModels.has(m));
+    const isGroqAvailable = Boolean(GROQ_API_KEY) && GROQ_MODELS.concat(GROQ_MODEL).some((m) => !deadGroqModels.has(m));
+    const candidateGroqModels = isGroqAvailable
+      ? Array.from(new Set([
+          ...GROQ_MODELS,
+          GROQ_MODEL,
+          'openai/gpt-oss-120b',
+          'qwen/qwen3.8-27b',
+          'llama-3.3-70b-versatile',
+          'llama-3.1-8b-instant'
+        ])).filter((m) => Boolean(m) && !deadGroqModels.has(m))
+      : [];
 
-    if (GROQ_API_KEY && candidateGroqModels.length > 0) {
+    if (candidateGroqModels.length > 0) {
       for (const modelToTry of candidateGroqModels) {
         try {
           solverStats.groqRequests++;
@@ -1286,8 +1290,12 @@ ${exampleOutput}`;
             if (normalized) {
               return { ...normalized, cacheKey };
             }
-          } else if (gResult.type === 'rate_limit' && gResult.fatal) {
-            deadGroqModels.add(modelToTry);
+          } else if (gResult.type === 'rate_limit') {
+            if (gResult.fatal) {
+              deadGroqModels.add(modelToTry);
+            }
+            // Rate limit (cooldown or daily quota): do not hammer other models on the same provider
+            break;
           }
         } catch (e) {
           console.log(`    Groq (${modelToTry}) fallback failed:`, e.message || e);
