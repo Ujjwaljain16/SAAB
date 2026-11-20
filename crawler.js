@@ -174,11 +174,19 @@ export async function getQueue(page) {
           const assignmentText = (assignmentLink?.textContent || '').trim();
           const homeworkText = (homeworkLink?.textContent || '').trim();
 
+          const cardContainer = anchor.closest('tr, [class*="session-row"], [class*="card"], [class*="item"]') || anchor.parentElement;
+          const isLocked = Boolean(
+            cardContainer?.querySelector('[class*="lock"], [class*="Lock"], svg[class*="lock"], i[class*="lock"]') ||
+            assignmentLink?.querySelector('[class*="lock"], [class*="Lock"]') ||
+            (assignmentText && (assignmentText.includes('🔒') || /lock/i.test(assignmentText)))
+          );
+
           return {
             title: text,
             classUrl: href.startsWith('http') ? href : `https://www.scaler.com${href}`,
             assignmentText,
             homeworkText,
+            isLocked
           };
         })
         .filter(Boolean)
@@ -193,6 +201,11 @@ export async function getQueue(page) {
     console.log(`  Found ${classCards.length} class(es) in this subject.`);
 
     for (const card of classCards) {
+      if (card.isLocked) {
+        console.log(`    🔒 Locked: ${card.title} (${card.assignmentText || 'Locked'}) - Skipping future class`);
+        continue;
+      }
+
       const assignmentProgress = parseProgressCount(card.assignmentText);
       const hasPendingAssignment = assignmentProgress ? assignmentProgress.completed < assignmentProgress.total : false;
 

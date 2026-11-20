@@ -118,8 +118,8 @@ export async function readMcqState(page) {
         const m = chip.match(/(\d+)\s*attempts?\s*left/i);
         return {
             attemptsLeft: m ? Number(m[1]) : null,
-            green: document.querySelector('[style*="background-color: rgb(82, 196, 26)"], .cr-multiple-choice--correct') != null,
-            danger: document.querySelector('.status-tag-2--danger, .status-tag-2--red') != null
+            green: document.querySelector('[style*="background-color: rgb(82, 196, 26)"], .cr-multiple-choice--correct, [class*="correct"]') != null,
+            danger: document.querySelector('.status-tag-2--danger, .status-tag-2--red, .cr-multiple-choice--incorrect, .cr-multiple-choice--wrong, [class*="incorrect"], [class*="wrong"], [class*="danger"], [class*="has-error"], [style*="rgb(255, 77, 79)"], [style*="rgb(245, 34, 45)"]') != null
         };
     }).catch(() => ({ attemptsLeft: null, green: false, danger: false }));
     return { solved: state === 'solved', attempted: state === 'attempted', ...rest };

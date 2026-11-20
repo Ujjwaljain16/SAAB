@@ -339,16 +339,64 @@ export function isLoginUrl(url) {
   return /\/(login|sign_in)\b/i.test(url || '');
 }
 
+export async function isProblemLocked(page) {
+  return page.evaluate(() => {
+    const bodyText = (document.body?.innerText || '').toLowerCase();
+    // 1. Direct text markers for locked problems / future assignments
+    if (
+      bodyText.includes('assignment problems are locked right now') ||
+      bodyText.includes('problems are locked right now') ||
+      bodyText.includes('problems are locked') ||
+      bodyText.includes('problems will open in') ||
+      bodyText.includes('assignment is locked') ||
+      (bodyText.includes('will open in') && (bodyText.includes('days') || bodyText.includes('hrs') || bodyText.includes('mins')))
+    ) {
+      return true;
+    }
+
+    // 2. Lock modals or dialog containers
+    const modals = Array.from(document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="popup"], [class*="Modal"], [class*="Overlay"]'));
+    for (const m of modals) {
+      const text = (m.innerText || '').toLowerCase();
+      if (text.includes('locked') || text.includes('open in')) {
+        return true;
+      }
+    }
+
+    // 3. Tab bar lock indicator
+    const activeTab = document.querySelector('a[href*="/assignment"], [class*="tab--active"], .active');
+    if (activeTab) {
+      const hasLock = activeTab.querySelector('[class*="lock"], [class*="Lock"], svg, i') != null || activeTab.textContent.includes('🔒');
+      if (hasLock && (bodyText.includes('open in') || bodyText.includes('locked'))) {
+        return true;
+      }
+    }
+
+    return false;
+  }).catch(() => false);
+}
+
 export async function detectProblemType(page, { timeoutMs = 20000 } = {}) {
-  // Wait for the problem controls to mount. Only SPECIFIC markers count; a loose text match on "launch"/"vs code" anywhere in the
-  // page (the statement, a nav link) used to end this wait too early or classify the page wrongly. Pages can take 7s+ to render
-  // when several load at once, so wait generously: the wait ends the moment a marker appears, so fast pages are not slowed down.
+  // 1. Fast check if problem / assignment is locked right now
+  if (await isProblemLocked(page)) {
+    return 'locked';
+  }
+
+  // Wait for the problem controls to mount. Also abort early if lock modal mounts!
   await page.waitForFunction((sel) => {
     const q = (s) => document.querySelector(s) != null;
+    const bodyText = (document.body?.innerText || '').toLowerCase();
+    const isLocked = bodyText.includes('problems are locked') || bodyText.includes('problems will open in') || bodyText.includes('locked right now');
+    if (isLocked) return true;
+
     const idButton = Array.from(document.querySelectorAll('button, a')).some((b) => /^open\s*(in\s*)?(the\s*)?(ide|vs\s*code)$/i.test((b.innerText || '').trim()));
     return q('.cr-multiple-choice-container, .cr-multiple-choice') || q('.monaco-editor') || q(sel.launch) || q(sel.ide) ||
       q('iframe[src*="maxwell"]') || idButton;
   }, { launch: SEL.labLaunchBtn, ide: SEL.ideContainer }, { timeout: timeoutMs }).catch(() => {});
+
+  if (await isProblemLocked(page)) {
+    return 'locked';
+  }
 
   // MCQ: the real marker only (a stray checkbox elsewhere on a coding/lab page must not make it an MCQ).
   const isMcq = (await page.locator('.cr-multiple-choice, .cr-multiple-choice-container').count()) > 0;

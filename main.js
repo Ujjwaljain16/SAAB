@@ -17,7 +17,8 @@ import { makeRunState, markClassComplete, markProblemComplete } from './run_stat
 import {
   previewCode, classifyFailureFeedback, resolveTargetLanguage, selectProblemLanguage,
   getCurrentSelectedLanguageLabel, extractProblemContent, extractTestCases, extractEditorStarterCode,
-  collectAssignmentProblems, collectQuestionTabs, mergeProblems, isSolvedNow, buildProblemsUrl, isLoginUrl, detectProblemType
+  collectAssignmentProblems, collectQuestionTabs, mergeProblems, isSolvedNow, buildProblemsUrl, isLoginUrl, detectProblemType,
+  isProblemLocked
 } from './scaler_page.js';
 import { pathToFileURL } from 'url';
 import { normalizeScalerUrl, canonicalProblemUrl } from './scaler_url.js';
@@ -307,8 +308,10 @@ async function run() {
       metrics.classesSkipped = queue.length - filteredQueue.length;
     }
 
-    for (const { classUrl, pending, subject } of filteredQueue) {
-      if (globalHaltRun) break;
+    const lockedClasses = new Set();
+
+    async function processClass({ classUrl, pending, subject }, passNum = 1) {
+      if (globalHaltRun || lockedClasses.has(classUrl)) return;
 
       if (mainPage.isClosed()) {
         try {
@@ -316,19 +319,28 @@ async function run() {
         } catch {
           globalHaltRun = true;
           globalHaltReason = 'The browser window was closed';
-          break;
+          return;
         }
       }
 
       metrics.classesSeen += 1;
       console.log(`\n============================================================`);
-      console.log(`Processing class: ${classUrl}\nPending: ${pending}\nSubject: ${subject}`);
+      console.log(`Processing class (Pass ${passNum}): ${classUrl}\nPending: ${pending}\nSubject: ${subject}`);
       console.log(`============================================================`);
 
       try {
         let problemsUrl = normalizeScalerUrl(`${classUrl}/assignment/problems?navref=cl_tb_br`);
         await safeGoto(mainPage, problemsUrl);
         await ensureLoggedIn(mainPage, ctx, 'assignment problems navigation');
+
+        // Check if class assignment problems are locked
+        if (await isProblemLocked(mainPage)) {
+          console.log(`\n  🔒 [LOCKED CLASS] Assignment problems are locked right now ("Problems will open in..."). Skipping class: ${classUrl}\n`);
+          lockedClasses.add(classUrl);
+          log.push({ title: `Class: ${classUrl}`, result: 'skipped' });
+          metrics.classesSkipped += 1;
+          return;
+        }
 
         const hasDirectProblems = await mainPage.waitForSelector('tr.table__row a[href*="/assignment/problems/"], a.cr-p-navigation-dock-item[href*="/assignment/problems/"]', { timeout: 8000 }).catch(() => null);
         if (!hasDirectProblems && !mainPage.url().includes('/assignment/problems')) {
@@ -369,16 +381,23 @@ async function run() {
           if (p.isSolved && !E2E_CLASS) runState.completedProblems.add(p.solveUrl);
         }
 
-        if (problems.length === 0) {
+        if (problems.length === 0 || (await isProblemLocked(mainPage))) {
+          if (await isProblemLocked(mainPage)) {
+            console.log(`\n  🔒 [LOCKED CLASS] Assignment problems are locked right now ("Problems will open in..."). Skipping class: ${classUrl}\n`);
+            lockedClasses.add(classUrl);
+            log.push({ title: `Class: ${classUrl}`, result: 'skipped' });
+            metrics.classesSkipped += 1;
+            return;
+          }
           console.log('No assignment problems found on this page.');
           await snapshotPage(mainPage, 'no-problems-found', classUrl);
-          continue;
+          return;
         }
 
       console.log(`Found ${problems.length} assignment problem(s). Initiating Page Pool workers...`);
 
       // Filter unsolved
-      const pendingProblems = problems.filter((p) => !runState.completedProblems.has(canonicalProblemUrl(p.solveUrl)));
+      let pendingProblems = problems.filter((p) => !runState.completedProblems.has(canonicalProblemUrl(p.solveUrl)));
 
       if (pendingProblems.length === 0) {
         console.log('All extracted problems in this class are already completed from checkpoint.');
@@ -388,7 +407,7 @@ async function run() {
         } else {
           console.log(`Class has ${pending} on dashboard, but extracted table had 0 pending. Retaining class for recheck.`);
         }
-        continue;
+        return;
       }
 
       console.log(`Pending problems to solve: ${pendingProblems.length}/${problems.length}`);
@@ -404,6 +423,7 @@ async function run() {
 
       let problemQueueIndex = 0;
       let classAllPassed = true;
+      let classIsLocked = false;
       // Labs / IDE problems need the single shared container slot and take 30-40s each. A worker that finds the slot busy defers
       // the problem instead of sitting idle, keeps doing other problems, and comes back to it when the slot is free.
       const deferredLabs = [];
@@ -415,7 +435,7 @@ async function run() {
       async function runWorker(initialPage, workerId) {
         let page = initialPage;
         let pageRecoveries = 0;
-        while (!globalHaltRun) {
+        while (!globalHaltRun && !classIsLocked) {
           if (allProvidersExhausted()) {
             globalHaltRun = true;
             globalHaltReason = 'All AI providers are out of daily quota. Add GROQ_API_KEY (free) or more GEMINI_API_KEYS, or resume tomorrow - progress is checkpointed.';
@@ -455,11 +475,26 @@ async function run() {
             continue;
           }
 
+          if (classIsLocked) {
+            console.log(`  [Worker ${workerId}] 🔒 Class assignment is locked. Skipping: ${problem.title}`);
+            log.push({ title: problem.title, result: 'skipped' });
+            metrics.problemsSkipped += 1;
+            continue;
+          }
+
           console.log(`\n  [Worker ${workerId}] Navigating to: ${problem.title}`);
           metrics.problemsRead += 1;
 
           await safeGoto(page, normalizeScalerUrl(solveUrl));
           await ensureLoggedIn(page, ctx, `worker ${workerId} problem page`);
+
+          if (await isProblemLocked(page)) {
+            console.log(`  [Worker ${workerId}] 🔒 Assignment problems are locked right now on Scaler ("Problems will open in..."). Skipping: ${problem.title}`);
+            log.push({ title: problem.title, result: 'skipped' });
+            metrics.problemsSkipped += 1;
+            classIsLocked = true;
+            continue;
+          }
 
           if (await solvedGuard(page, { wait: true })) {
             console.log(`  [Worker ${workerId}] Already solved on Scaler: ${problem.title}`);
@@ -470,12 +505,33 @@ async function run() {
 
           const targetLanguage = resolveTargetLanguage(subject);
           let type = await detectProblemType(page);
+
+          if (type === 'locked' || (await isProblemLocked(page))) {
+            console.log(`  [Worker ${workerId}] 🔒 Assignment problems are locked right now on Scaler ("Problems will open in..."). Skipping: ${problem.title}`);
+            log.push({ title: problem.title, result: 'skipped' });
+            metrics.problemsSkipped += 1;
+            classIsLocked = true;
+            continue;
+          }
+
           for (let reloadN = 1; type === 'unknown' && reloadN <= 2; reloadN++) {
+            if (classIsLocked || (await isProblemLocked(page))) {
+              type = 'locked';
+              break;
+            }
             // Nothing recognisable has rendered (a slow page). Reload and look again; never guess a problem type.
             console.log(`  [Worker ${workerId}] Page not recognised yet; reloading (${reloadN}/2): ${problem.title}`);
             await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
             await ensureLoggedIn(page, ctx, `worker ${workerId} reload`);
             type = await detectProblemType(page);
+          }
+
+          if (type === 'locked') {
+            console.log(`  [Worker ${workerId}] 🔒 Assignment problems are locked right now on Scaler ("Problems will open in..."). Skipping: ${problem.title}`);
+            log.push({ title: problem.title, result: 'skipped' });
+            metrics.problemsSkipped += 1;
+            classIsLocked = true;
+            continue;
           }
           if (type === 'unknown' && !requeuedProblems.has(solveUrl)) {
             // Usually a slow network, not a broken page: try it again after the rest of the queue, when the connection is less busy.
@@ -774,6 +830,7 @@ async function run() {
               const confirmedWrong = mcqInjectResult.verdict === 'Incorrect';
               if (confirmedWrong) {
                 recordWrongMCQOption(mcqResult.cacheKey, mcqResult.bestOptionIndex);
+                console.log(`  [Worker ${workerId}] 🔁 ReAct Self-Correction on ${problem.title}: Option ${String.fromCharCode(65 + mcqResult.bestOptionIndex)} was wrong (${mcqInjectResult.verdict}). Excluding from retry ${mcqTry + 1}/${MAX_MCQ_TRIES}...`);
               }
 
               // Only a confirmed wrong answer earns another try; a timeout / unknown verdict must not keep clicking blindly.
@@ -870,7 +927,7 @@ async function run() {
 
             evictSolution(solveResult.cacheKey);
             failureFeedback = submitResult.feedback || submitResult.verdict || 'Submission failed.';
-            console.log(`  [Worker ${workerId}] Attempt ${attempt} failed: ${failureFeedback.slice(0, 160)}...`);
+            console.log(`  [Worker ${workerId}] 🔁 ReAct Self-Correction on ${problem.title}: Attempt ${attempt} failed: ${failureFeedback.slice(0, 160)}... Reflecting on failure & adapting code for attempt ${attempt + 1}/${MAX_CODING_ATTEMPTS}...`);
             await DELAY(500);
           }
 
@@ -932,9 +989,36 @@ async function run() {
         }
       }
 
-      // Execute all workers concurrently
+      // Execute all workers concurrently (Pass 1)
       const workers = workerPages.map((workerPage, i) => runWorker(workerPage, i));
       await Promise.all(workers);
+
+      // ReAct Multi-Pass Retry Sweep within this class
+      const getRemainingUnsolved = () => problems.filter((p) => {
+        const canonical = canonicalProblemUrl(p.solveUrl);
+        return !runState.completedProblems.has(canonical);
+      });
+
+      let remainingUnsolved = getRemainingUnsolved();
+      if (remainingUnsolved.length > 0 && !globalHaltRun && !classIsLocked && !DRY_RUN && !allProvidersExhausted()) {
+        console.log(`\n============================================================`);
+        console.log(`🔁 [ReAct Retry Sweep] Pass 1 finished. ${remainingUnsolved.length} problem(s) remain unsolved in this class.`);
+        console.log(`Starting self-correcting retry sweep: ${remainingUnsolved.map(p => p.title).join(', ')}`);
+        console.log(`============================================================\n`);
+
+        pendingProblems = remainingUnsolved;
+        problemQueueIndex = 0;
+        deferredLabs.length = 0;
+        requeuedProblems.clear();
+
+        const activeSweepPages = workerPages.filter(p => !p.isClosed());
+        if (activeSweepPages.length === 0) {
+          activeSweepPages.push(await ctx.newPage());
+        }
+        const sweepWorkers = activeSweepPages.map((workerPage, i) => runWorker(workerPage, i));
+        await Promise.all(sweepWorkers);
+      }
+
       if (!workerPages[0].isClosed()) mainPage = workerPages[0];
 
       // Close extra worker pages to release memory, keeping mainPage
@@ -942,22 +1026,45 @@ async function run() {
         await workerPages[i].close().catch(() => {});
       }
 
-        const progress = parseProgressCount(pending);
-        const curriculumFullyDone = !progress || progress.completed >= progress.total;
+      const remainingAfterSweep = getRemainingUnsolved();
+      const curriculumFullyDone = remainingAfterSweep.length === 0;
 
-        if (!DRY_RUN && classAllPassed && pendingProblems.length > 0 && !globalHaltRun && curriculumFullyDone) {
-          console.log(`✓ All problems passed for class: ${classUrl}. Marking class complete!`);
-          markClassComplete(runState, classUrl);
-        } else if (DRY_RUN && classAllPassed && pendingProblems.length > 0) {
-          console.log(`↺ Dry-run preview completed for class: ${classUrl}`);
-        } else if (classAllPassed && !curriculumFullyDone) {
-          console.log(`Class ${classUrl} passed current batch, but curriculum indicates ${pending}. Class remains open.`);
-        }
-      } catch (classErr) {
-        console.error(`  ⚠️ Error processing class ${classUrl}:`, classErr.message);
-        metrics.classesSkipped += 1;
+      if (!DRY_RUN && curriculumFullyDone && !globalHaltRun && !classIsLocked) {
+        console.log(`✓ All problems passed for class: ${classUrl}. Marking class complete!`);
+        markClassComplete(runState, classUrl);
+      } else if (DRY_RUN) {
+        console.log(`↺ Dry-run preview completed for class: ${classUrl}`);
+      } else {
+        console.log(`Class ${classUrl} has ${remainingAfterSweep.length} unsolved problem(s) remaining.`);
       }
+    } catch (classErr) {
+      console.error(`  ⚠️ Error processing class ${classUrl}:`, classErr.message);
+      metrics.classesSkipped += 1;
     }
+  }
+
+  // Pass 1: Process each class in the initial queue
+  for (const item of filteredQueue) {
+    if (globalHaltRun) break;
+    await processClass(item, 1);
+  }
+
+  // Global Multi-Pass ReAct Sweep across remaining incomplete classes
+  const classesForGlobalSweep = filteredQueue.filter(
+    (c) => !runState.completedClasses.has(c.classUrl) && !lockedClasses.has(c.classUrl)
+  );
+
+  if (classesForGlobalSweep.length > 0 && !globalHaltRun && !DRY_RUN && !allProvidersExhausted()) {
+    console.log(`\n============================================================`);
+    console.log(`🔁 [Global ReAct Sweep] Initial class queue completed.`);
+    console.log(`${classesForGlobalSweep.length} class(es) still have pending problems. Starting final global retry sweep...`);
+    console.log(`============================================================\n`);
+
+    for (const item of classesForGlobalSweep) {
+      if (globalHaltRun || allProvidersExhausted()) break;
+      await processClass(item, 2);
+    }
+  }
   } finally {
     try {
       const logJson = JSON.stringify(log, null, 2);

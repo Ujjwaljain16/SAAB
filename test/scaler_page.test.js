@@ -9,7 +9,8 @@ import {
   extractTestCases,
   isLoginUrl,
   looksSolved,
-  mergeProblems
+  mergeProblems,
+  isProblemLocked
 } from '../scaler_page.js';
 
 test('isProblemHref accepts only real question links (regression: help-requests / submissions were solved as questions)', () => {
@@ -104,3 +105,33 @@ test('mergeProblems tolerates empty and malformed input', () => {
   assert.deepEqual(mergeProblems(undefined, null), []);
   assert.deepEqual(mergeProblems([{ title: 'x' }, null, { solveUrl: '' }], []), []);
 });
+
+test('isProblemLocked identifies locked assignment modal and countdown', async () => {
+  const makeMockPage = (bodyText, selectors = {}) => ({
+    evaluate: async (fn) => {
+      // simulate browser evaluate environment
+      const fakeDoc = {
+        body: { innerText: bodyText },
+        querySelectorAll: (sel) => selectors[sel] || [],
+        querySelector: (sel) => (selectors[sel] ? selectors[sel][0] : null)
+      };
+      const origDoc = globalThis.document;
+      try {
+        globalThis.document = fakeDoc;
+        return fn();
+      } finally {
+        globalThis.document = origDoc;
+      }
+    }
+  });
+
+  const lockedPage = makeMockPage('Assignment problems are locked right now\nProblems will open in 04Days 10Hrs 29Mins');
+  assert.equal(await isProblemLocked(lockedPage), true);
+
+  const countdownPage = makeMockPage('Problems will open in 2 days 4 hrs');
+  assert.equal(await isProblemLocked(countdownPage), true);
+
+  const unlockedPage = makeMockPage('Q1. Allocate Books\nProblem Description\nGiven an array of integers...');
+  assert.equal(await isProblemLocked(unlockedPage), false);
+});
+
