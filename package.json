@@ -5,7 +5,9 @@
   "main": "main.js",
   "type": "module",
   "scripts": {
+    "prestart": "node scripts/bootstrap.js",
     "start": "node ui_server.js",
+    "prestart:cli": "node scripts/bootstrap.js",
     "start:cli": "node main.js",
     "start:mcq": "node main.js --only-mcq",
     "start:labs": "node main.js --only-labs",
@@ -16,6 +18,7 @@
     "auth": "node auth.js",
     "auth:bits": "node bits_auth.js",
     "test:bits": "node test_bits_dom.js",
+    "preui": "node scripts/bootstrap.js",
     "ui": "node ui_server.js",
     "build:extension": "npm --prefix extension run build",
     "test:extension": "npm --prefix extension run test",

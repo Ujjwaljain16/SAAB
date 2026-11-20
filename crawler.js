@@ -178,7 +178,11 @@ export async function getQueue(page) {
           const isLocked = Boolean(
             cardContainer?.querySelector('[class*="lock"], [class*="Lock"], svg[class*="lock"], i[class*="lock"]') ||
             assignmentLink?.querySelector('[class*="lock"], [class*="Lock"]') ||
-            (assignmentText && (assignmentText.includes('🔒') || /lock/i.test(assignmentText)))
+            (assignmentText && (assignmentText.includes('🔒') || /lock/i.test(assignmentText))) ||
+            Array.from(cardContainer?.querySelectorAll('svg') || []).some((svg) => {
+              const cls = (svg.getAttribute('class') || '').toLowerCase();
+              return cls.includes('lock') || /lock/i.test(svg.innerHTML || '');
+            })
           );
 
           return {

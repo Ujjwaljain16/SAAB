@@ -599,24 +599,31 @@ app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'ui', 'index.html'));
 });
 
-// Handle Server Errors
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`\n❌ Port ${PORT} is already in use by another running instance of Mission Control.`);
-    console.error(`👉 You can directly open the existing dashboard at: http://localhost:${PORT}`);
-    console.error(`💡 To kill the lingering process and restart, run in PowerShell:`);
-    console.error(`   Stop-Process -Id (Get-NetTCPConnection -LocalPort ${PORT}).OwningProcess -Force\n`);
-    process.exit(1);
-  } else {
-    console.error(`Server error:`, err);
-    process.exit(1);
-  }
-});
+// Start Server with automatic port fallback if port is already occupied
+function startServer(portToUse, remainingAttempts = 5) {
+  server.listen(portToUse, () => {
+    console.log(`\n============================================================`);
+    console.log(`🚀 Mission Control Dashboard is live!`);
+    console.log(`📡 URL: http://localhost:${portToUse}`);
+    console.log(`============================================================\n`);
+  });
 
-// Start Server
-server.listen(PORT, () => {
-  console.log(`\n============================================================`);
-  console.log(`🚀 Mission Control Dashboard is live!`);
-  console.log(`📡 URL: http://localhost:${PORT}`);
-  console.log(`============================================================\n`);
-});
+  server.once('error', (err) => {
+    if (err.code === 'EADDRINUSE' && !process.env.UI_PORT && remainingAttempts > 0) {
+      const nextPort = Number(portToUse) + 1;
+      console.warn(`⚠️ Port ${portToUse} is already in use. Retrying on port ${nextPort}...`);
+      startServer(nextPort, remainingAttempts - 1);
+    } else if (err.code === 'EADDRINUSE') {
+      console.error(`\n❌ Port ${portToUse} is already in use by another running instance of Mission Control.`);
+      console.error(`👉 You can directly open the existing dashboard at: http://localhost:${portToUse}`);
+      console.error(`💡 To kill the lingering process and restart, run in PowerShell:`);
+      console.error(`   Stop-Process -Id (Get-NetTCPConnection -LocalPort ${portToUse}).OwningProcess -Force\n`);
+      process.exit(1);
+    } else {
+      console.error(`Server error:`, err);
+      process.exit(1);
+    }
+  });
+}
+
+startServer(PORT);

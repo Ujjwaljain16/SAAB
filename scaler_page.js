@@ -349,13 +349,17 @@ export async function isProblemLocked(page) {
       bodyText.includes('problems are locked') ||
       bodyText.includes('problems will open in') ||
       bodyText.includes('assignment is locked') ||
-      (bodyText.includes('will open in') && (bodyText.includes('days') || bodyText.includes('hrs') || bodyText.includes('mins')))
+      bodyText.includes('locked right now') ||
+      bodyText.includes('will open in') ||
+      /\bproblems?\s+are\s+locked\b/i.test(bodyText) ||
+      /\bproblems?\s+will\s+open\s+in\b/i.test(bodyText) ||
+      (bodyText.includes('open in') && (bodyText.includes('days') || bodyText.includes('hrs') || bodyText.includes('mins') || bodyText.includes('day') || bodyText.includes('hr') || bodyText.includes('min')))
     ) {
       return true;
     }
 
-    // 2. Lock modals or dialog containers
-    const modals = Array.from(document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="popup"], [class*="Modal"], [class*="Overlay"]'));
+    // 2. Lock modals or dialog containers (e.g. panda lock modal)
+    const modals = Array.from(document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="popup"], [class*="Modal"], [class*="Overlay"], div[role="dialog"]'));
     for (const m of modals) {
       const text = (m.innerText || '').toLowerCase();
       if (text.includes('locked') || text.includes('open in')) {
@@ -363,12 +367,19 @@ export async function isProblemLocked(page) {
       }
     }
 
-    // 3. Tab bar lock indicator
-    const activeTab = document.querySelector('a[href*="/assignment"], [class*="tab--active"], .active');
-    if (activeTab) {
-      const hasLock = activeTab.querySelector('[class*="lock"], [class*="Lock"], svg, i') != null || activeTab.textContent.includes('🔒');
-      if (hasLock && (bodyText.includes('open in') || bodyText.includes('locked'))) {
-        return true;
+    // 3. Tab bar or header lock indicators (e.g. "Assignment 0/11 🔒")
+    const tabs = Array.from(document.querySelectorAll('a[href*="/assignment"], [class*="tab"], div[role="tab"]'));
+    for (const tab of tabs) {
+      const text = (tab.innerText || '').toLowerCase();
+      if (text.includes('assignment')) {
+        const hasSvgLock = Array.from(tab.querySelectorAll('svg')).some((svg) => {
+          const cls = (svg.getAttribute('class') || '').toLowerCase();
+          return cls.includes('lock') || /lock/i.test(svg.innerHTML || '');
+        });
+        const hasLockClass = tab.querySelector('[class*="lock"], [class*="Lock"], i[class*="lock"]') != null;
+        if (text.includes('🔒') || hasSvgLock || hasLockClass) {
+          return true;
+        }
       }
     }
 
