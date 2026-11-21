@@ -3,8 +3,8 @@ import { chromium } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { BITS_URLS, COURSERA_TIMEOUTS } from './bits_config.js';
-import { discoverDegreeDashboard, ensureCourseraLoggedIn } from './bits_crawler.js';
+import { BITS_URLS } from './bits_config.js';
+import { discoverDegreeDashboard } from './bits_crawler.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -55,7 +55,7 @@ export function parseQuizText(rawText, sourceName = 'document') {
   const items = [];
 
   // Split by Question markers: "Question 1", "Q1.", "1.", "1)", etc.
-  const blocks = rawText.split(/(?:\r?\n)+(?=(?:Question\s*\d+|Q\s*\d+[\.:\)]|\d+[\.\)]\s+[A-Z]))/i);
+  const blocks = rawText.split(/(?:\r?\n)+(?=(?:Question\s*\d+|Q\s*\d+[.:)]|\d+[.)]\s+[A-Z]))/i);
 
   for (const block of blocks) {
     const trimmed = block.trim();
@@ -65,7 +65,7 @@ export function parseQuizText(rawText, sourceName = 'document') {
     const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (lines.length === 0) continue;
 
-    let prompt = lines[0].replace(/^(?:Question\s*\d+[:\.\)]*|Q\s*\d+[:\.\)]*|\d+[\.\)]*)\s*/i, '').trim();
+    let prompt = lines[0].replace(/^(?:Question\s*\d+[:.)]*|Q\s*\d+[:.)]*|\d+[.)]*)\s*/i, '').trim();
 
     // If first line was just "Question 1", prompt is the second line
     if (prompt.length < 5 && lines.length > 1) {
@@ -83,11 +83,11 @@ export function parseQuizText(rawText, sourceName = 'document') {
 
     // Look for options marked with [x], (x), (Correct), ✓, *, etc.
     for (const line of lines) {
-      if (/\([xX✓\*]\)|\[[xX✓\*]\]|(?:\(Correct\)|\[Correct\]|\bcorrect\b)/i.test(line)) {
+      if (/\([xX✓*]\)|\[[xX✓*]\]|(?:\(Correct\)|\[Correct\]|\bcorrect\b)/i.test(line)) {
         const cleanOption = line
-          .replace(/^[\(\[]?(?:[xX✓\*]|Correct)[\)\]]?\s*/i, '')
-          .replace(/^[\(\[]?[A-Za-z0-9][\.\)\]\s-]+/, '')
-          .replace(/\s*(?:\((?:Correct|x|X|✓|\*)\)|\[(?:Correct|x|X|✓|\*)\]|[✓\*])\s*$/i, '')
+          .replace(/^(?:\(|\[)?(?:[xX✓*]|Correct)(?:\)|\])?\s*/i, '')
+          .replace(/^(?:\(|\[)?[A-Za-z0-9][.)\]\s-]+/, '')
+          .replace(/\s*(?:\((?:Correct|x|X|✓|\*)\)|\[(?:Correct|x|X|✓|\*)\]|[✓*])\s*$/i, '')
           .trim();
         if (cleanOption) correctAnswers.push(cleanOption);
       }
@@ -423,8 +423,6 @@ export class AnswerStore {
 
     // Match each correct answer against Coursera's live options
     for (const rawAns of bestEntry.correctAnswers) {
-      const normAns = normalizeText(rawAns);
-
       // 1. If rawAns is a letter like "B" or "Option C"
       const letterMatch = rawAns.trim().match(/^[A-Da-d]$/) || rawAns.trim().match(/^option\s+([A-Da-d])$/i);
       if (letterMatch) {

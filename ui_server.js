@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { AnswerStore, answerStore } from './answer_indexer.js';
+import { answerStore } from './answer_indexer.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -137,7 +137,7 @@ app.get('/api/status', (req, res) => {
   // Helper to parse a human-readable quiz title from URL
   const formatQuizTitle = (url) => {
     if (!url) return 'Graded Quiz';
-    const match = url.match(/(graded-quiz-for-[^\/\?#]+)/i) || url.match(/\/team\/[^\/]+\/([^\/\?#]+)/i);
+    const match = url.match(/(graded-quiz-for-[^/?#]+)/i) || url.match(/\/team\/[^/]+\/([^/?#]+)/i);
     if (match) {
       return match[1]
         .split('-')
@@ -157,13 +157,13 @@ app.get('/api/status', (req, res) => {
   }
 
   Object.keys(runState).forEach((url) => {
-    const m = url.match(/\/learn\/([^\/\?#]+)/);
+    const m = url.match(/\/learn\/([^/?#]+)/);
     if (m) courseSlugSet.add(m[1]);
   });
 
   runLog.forEach((item) => {
     if (item.url) {
-      const m = item.url.match(/\/learn\/([^\/\?#]+)/);
+      const m = item.url.match(/\/learn\/([^/?#]+)/);
       if (m) courseSlugSet.add(m[1]);
     }
   });
@@ -326,7 +326,7 @@ app.get('/api/answers', async (req, res) => {
 app.post('/api/upload', (req, res) => {
   const rawFileName = req.query.filename || `answers_${Date.now()}.txt`;
   // Sanitize filename to prevent directory traversal
-  const safeFileName = path.basename(rawFileName).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+  const safeFileName = path.basename(rawFileName).replace(/[^a-zA-Z0-9_.-]/g, '_');
   const targetPath = path.join(ANSWERS_DIR, safeFileName);
 
   const writeStream = fs.createWriteStream(targetPath);

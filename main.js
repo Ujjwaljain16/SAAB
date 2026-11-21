@@ -862,6 +862,7 @@ async function run() {
           }
 
           // Coding problem
+          const MAX_CODING_ATTEMPTS = 3;
           await selectProblemLanguage(page, targetLanguage);
           const selectedLanguageLabel = await getCurrentSelectedLanguageLabel(page);
           const starterCode = await extractEditorStarterCode(page);
@@ -870,7 +871,7 @@ async function run() {
           let failureFeedback = '';
           let alreadySolved = false;
 
-          for (let attempt = 1; attempt <= 3; attempt++) {
+          for (let attempt = 1; attempt <= MAX_CODING_ATTEMPTS; attempt++) {
             if (globalHaltRun) break;
 
             // A slow judge verdict (or another worker / the user) may already have solved it: never submit onto a solved problem.
@@ -1047,7 +1048,7 @@ async function run() {
       const remainingAfterSweep = getRemainingUnsolved();
       const curriculumFullyDone = remainingAfterSweep.length === 0;
 
-      if (!DRY_RUN && curriculumFullyDone && !globalHaltRun && !classIsLocked) {
+      if (!DRY_RUN && curriculumFullyDone && classAllPassed && !globalHaltRun && !classIsLocked) {
         console.log(`✓ All problems passed for class: ${classUrl}. Marking class complete!`);
         markClassComplete(runState, classUrl);
       } else if (DRY_RUN) {

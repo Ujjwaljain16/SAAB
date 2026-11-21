@@ -114,6 +114,8 @@ const jsonConfig = (slot, extra = {}) =>
 const slotCircuitBreakers = GEMINI_SLOTS.map((_, i) =>
   new CircuitBreaker({ name: `gemini:${i}` })
 );
+const groqCircuitBreaker = new CircuitBreaker({ name: 'groq' });
+const grokCircuitBreaker = new CircuitBreaker({ name: 'grok' });
 
 // A slot is unusable for today if a 429 said so (this run), persisted daily budget says so, or circuit breaker is OPEN.
 function isGeminiKeyDead(slot) {
@@ -172,8 +174,8 @@ function geminiWaitMs() {
 }
 
 function hasFallbackProvider() {
-  const groqOk = Boolean(GROQ_API_KEY) && GROQ_MODELS.concat(GROQ_MODEL).some((m) => !deadGroqModels.has(m));
-  const grokOk = Boolean(GROK_API_KEY && GROK_MODEL) && !grokDead;
+  const groqOk = Boolean(GROQ_API_KEY) && !groqCircuitBreaker.isOpen() && GROQ_MODELS.concat(GROQ_MODEL).some((m) => !deadGroqModels.has(m));
+  const grokOk = Boolean(GROK_API_KEY && GROK_MODEL) && !grokCircuitBreaker.isOpen() && !grokDead;
   return groqOk || grokOk;
 }
 
@@ -488,6 +490,11 @@ async function generateWithGrok(promptText) {
   if (grokDead) {
     return { ok: false, type: 'rate_limit', retryAfterSeconds: 3600, fatal: true, message: 'Grok is out of daily quota' };
   }
+
+  if (grokCircuitBreaker.isOpen()) {
+    return { ok: false, type: 'circuit_open', message: `Circuit OPEN for Grok (${Math.ceil(grokCircuitBreaker.remainingCooldownMs() / 1000)}s)` };
+  }
+
   try {
     await paceApiCall('grok');
   } catch (err) {
@@ -510,6 +517,7 @@ async function generateWithGrok(promptText) {
       })
     });
   } catch (error) {
+    grokCircuitBreaker.markFailure(error);
     return {
       ok: false,
       type: 'solver_error',
@@ -541,6 +549,7 @@ async function generateWithGrok(promptText) {
       };
     }
 
+    grokCircuitBreaker.markFailure(new Error(errMsg));
     return {
       ok: false,
       type: 'solver_error',
@@ -548,6 +557,7 @@ async function generateWithGrok(promptText) {
     };
   }
 
+  grokCircuitBreaker.markSuccess();
   const content = data?.choices?.[0]?.message?.content;
   const text = typeof content === 'string'
     ? content
@@ -565,6 +575,10 @@ async function generateWithGroq(promptText, modelName = GROQ_MODEL, maxTokens = 
 
   if (deadGroqModels.has(modelName)) {
     return { ok: false, type: 'rate_limit', retryAfterSeconds: 3600, fatal: true, message: `Groq model ${modelName} is out of daily quota` };
+  }
+
+  if (groqCircuitBreaker.isOpen()) {
+    return { ok: false, type: 'circuit_open', message: `Circuit OPEN for Groq (${Math.ceil(groqCircuitBreaker.remainingCooldownMs() / 1000)}s)` };
   }
 
   const payload = {
@@ -611,6 +625,7 @@ async function generateWithGroq(promptText, modelName = GROQ_MODEL, maxTokens = 
       body: JSON.stringify(payload)
     });
   } catch (error) {
+    groqCircuitBreaker.markFailure(error);
     return {
       ok: false,
       type: 'solver_error',
@@ -642,6 +657,7 @@ async function generateWithGroq(promptText, modelName = GROQ_MODEL, maxTokens = 
       };
     }
 
+    groqCircuitBreaker.markFailure(new Error(errMsg));
     return {
       ok: false,
       type: 'solver_error',
@@ -649,6 +665,7 @@ async function generateWithGroq(promptText, modelName = GROQ_MODEL, maxTokens = 
     };
   }
 
+  groqCircuitBreaker.markSuccess();
   const content = data?.choices?.[0]?.message?.content || "";
   const reasoning = data?.choices?.[0]?.message?.reasoning || "";
   const text = reasoning ? `<think>${reasoning}</think>${content}` : content;
@@ -834,10 +851,9 @@ export function getQuotaReport() {
 async function callGemini(clientIdx, contents, config = {}) {
   const cb = circuitBreakerFor(clientIdx);
 
-  let isProbe = false;
   if (cb) {
     try {
-      isProbe = cb.checkAndAcquire(); // throws CircuitOpenError if OPEN
+      cb.checkAndAcquire(); // throws CircuitOpenError if OPEN
     } catch (err) {
       if (err instanceof CircuitOpenError) {
         return {
@@ -1215,7 +1231,7 @@ export async function solveMCQ(problemContent) {
 
     // Pattern 2: Standalone bracketed letters like (A) or [B]
     if (letterMatches.length === 0) {
-      const bracketRegex = /[\(\[]([A-Da-d])[\)\]]/g;
+      const bracketRegex = /[([]([A-Da-d])[)\]]/g;
       while ((match = bracketRegex.exec(rawText)) !== null) {
         letterMatches.push(match[1].toUpperCase().charCodeAt(0) - 65);
       }

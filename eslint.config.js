@@ -2,13 +2,22 @@ import js from '@eslint/js';
 import globals from 'globals';
 
 export default [
-  { ignores: ['bits_*.js', 'test_bits_dom.js', 'node_modules/', 'debug/', 'runs/', '.solver-cache/', 'temp_chrome_profile/'] },
+  { ignores: ['bits_*.js', 'test_bits_dom.js', 'node_modules/', 'debug/', 'runs/', '.solver-cache/', 'temp_chrome_profile/', 'extension/'] },
   js.configs.recommended,
   {
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'module',
-      globals: { ...globals.node, window: 'readonly', document: 'readonly', location: 'readonly', DataTransfer: 'readonly', ClipboardEvent: 'readonly' }
+      globals: {
+        ...globals.node,
+        ...globals.browser,
+        window: 'readonly',
+        document: 'readonly',
+        location: 'readonly',
+        DataTransfer: 'readonly',
+        ClipboardEvent: 'readonly',
+        chrome: 'readonly'
+      }
     },
     rules: {
       'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }],
