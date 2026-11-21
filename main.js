@@ -9,7 +9,7 @@ import {
 import { injectAndSubmit } from './injector.js';
 import { slurpWorkspaceContext, injectWorkspaceContext, waitForWorkspaceReady } from './workspace_manager.js';
 import { slurpMCQContext, injectMCQAnswer } from './mcq_handler.js';
-import { solveAndSubmitLab } from './lab_handler.js';
+import { executeLabTask } from './lab_handler.js';
 import { SEL } from './config.js';
 import { snapshotPage } from './page_utils.js';
 import { dataPath } from './paths.js';
@@ -607,7 +607,7 @@ async function run() {
               if (labOptions.forceSubmit) {
                 console.warn(`  [Worker ${workerId}] !!! TEST MODE: Run Task WILL be pressed on this already-solved lab: ${problem.title} !!!`);
               }
-              const labResult = await solveAndSubmitLab(
+              const labResult = await executeLabTask(
                 page,
                 problem.title,
                 `${problemContent.title}\n\n${problemContent.body}`,

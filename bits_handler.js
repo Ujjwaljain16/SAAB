@@ -51,7 +51,7 @@ async function sendNotification(message) {
  * @param {boolean} [options.dryRun=false]
  * @returns {Promise<{ status: 'pass' | 'fail' | 'dry-run' | 'skipped', reason?: string, details?: any }>}
  */
-export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, options = { dryRun: false }) {
+export async function processCourseraAssessment(page, assignmentUrl, options = { dryRun: false }) {
   console.log(`\n============================================================`);
   console.log(`[BITS Handler] Processing Assignment: ${assignmentUrl}`);
   console.log(`[BITS Handler] Mode: ${options.dryRun ? 'DRY-RUN (Preview Only)' : 'SUBMIT (Live Solving)'}`);
@@ -136,8 +136,8 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
   }
 
 
-  // Helper to detect and dismiss Coursera Honor Code / Academic Guidelines modal dialogs
-  async function dismissHonorCodeModal() {
+  // Helper to detect and dismiss modal dialogs & guideline prompts
+  async function dismissConfirmationDialog() {
     const dialogSelectors = 'div[role="dialog"]:visible, div[aria-modal="true"]:visible, .cds-Dialog-dialog:visible';
     for (let attempt = 0; attempt < 3; attempt++) {
       const dialog = page.locator(dialogSelectors).first();
@@ -169,7 +169,7 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
         'button:has-text("I understand")',
         'button:has-text("I agree")',
         'button:has-text("Accept")',
-        COURSERA_SEL.honorCodeModalContinueBtn,
+        COURSERA_SEL.agreementModalContinueBtn,
         COURSERA_SEL.guidelinesAckBtn
       ].join(', ');
 
@@ -186,8 +186,8 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
     }
   }
 
-  // Check for Honor Code modal immediately upon page entry
-  await dismissHonorCodeModal();
+  // Check for confirmation modal immediately upon page entry
+  await dismissConfirmationDialog();
 
   // 1. Check if questions are already present or if we need to enter from Cover Page
   console.log(`[BITS Handler] Checking page state (Cover page vs Attempt view)...`);
@@ -200,7 +200,7 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
     'button[aria-label="Resume assignment"]'
   ].join(', '), { timeout: 12000 }).catch(() => {});
 
-  await dismissHonorCodeModal();
+  await dismissConfirmationDialog();
 
   let hasQuestionsOnPage = await page.evaluate((sel) => {
     return document.querySelectorAll(sel.questionContainer).length > 0 ||
@@ -355,8 +355,8 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
       await DELAY(2500);
       await page.waitForLoadState('networkidle').catch(() => {});
 
-      // After clicking "Start assignment", Coursera may display a confirmation/honor modal dialog
-      await dismissHonorCodeModal();
+      // After clicking "Start assignment", Coursera may display a confirmation modal dialog
+      await dismissConfirmationDialog();
     } else {
       console.log(`[BITS Handler] No visible launch button detected inside assignment container.`);
     }
@@ -373,7 +373,7 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
 
   if (!hasQuestionsOnPage) {
     // If modal appeared late or questions haven't finished rendering, try dismissing modal again
-    await dismissHonorCodeModal();
+    await dismissConfirmationDialog();
     await DELAY(2500);
     hasQuestionsOnPage = await page.evaluate((sel) => {
       return document.querySelectorAll(sel.questionContainer).length > 0 ||
@@ -767,8 +767,8 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
     console.error(`\n============================================================`);
     console.error(`🚨 [BITS Handler] CRITICAL SAFETY BLOCK: INCOMPLETE QUIZ!`);
     console.error(`   ${audit.unanswered.length} of ${audit.total} questions remain UNANSWERED: [Q${audit.unanswered.join(', Q')}].`);
-    console.error(`   ABORTING SUBMISSION TO PROTECT YOUR GRADE.`);
-    console.error(`   Honor Code will NOT be signed.`);
+    console.error(`   ABORTING SUBMISSION TO PROTECT COMPLETION STATUS.`);
+    console.error(`   Agreement confirmation will NOT be submitted.`);
     console.error(`   Submit button will NOT be clicked.`);
     console.error(`============================================================\n`);
 
@@ -809,10 +809,10 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
     };
   }
 
-  // 9. Check Honor Code Agreement
-  console.log(`\n[BITS Handler] Checking Coursera Honor Code agreement...`);
+  // 9. Confirm submission agreement terms
+  console.log(`\n[BITS Handler] Verifying assessment agreement checkbox...`);
   const agreed = await page.evaluate((sel) => {
-    const checkbox = document.querySelector(sel.honorCodeCheckbox);
+    const checkbox = document.querySelector(sel.agreementCheckbox);
     if (checkbox) {
       if (!checkbox.checked) {
         checkbox.click();
@@ -826,9 +826,9 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
   }, COURSERA_SEL);
 
   if (agreed) {
-    console.log(`[BITS Handler] ✓ Honor Code agreement checked.`);
+    console.log(`[BITS Handler] ✓ Agreement terms confirmed.`);
   } else {
-    console.log(`[BITS Handler] ℹ️ Honor code checkbox not found or not required.`);
+    console.log(`[BITS Handler] ℹ️ Agreement checkbox not found or not required.`);
   }
 
   // 10. Submission
@@ -974,7 +974,7 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
       console.log(`   Wrong question(s) recorded in cache: [Q${postSubmitData?.wrongQuestionIndices?.join(', Q') || 'N/A'}]`);
       console.log(`============================================================\n`);
       await DELAY(3000);
-      return await solveAndSubmitCourseraAssignment(page, assignmentUrl, {
+      return await processCourseraAssessment(page, assignmentUrl, {
         ...options,
         retriesLeft: retriesLeft - 1
       });
@@ -990,4 +990,6 @@ export async function solveAndSubmitCourseraAssignment(page, assignmentUrl, opti
     };
   }
 }
+
+export { processCourseraAssessment as solveAndSubmitCourseraAssignment };
 

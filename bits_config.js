@@ -35,8 +35,8 @@ export const COURSERA_SEL = {
   tunnelContainer: '[data-testid="assignment-view-tunnel-vision"], [data-testid="tunnel-vision-content"]',
   tunnelBackBtn: 'button[data-testid="tunnel-vision-back-button"]',
   guidelinesAckBtn: 'button[data-action="acknowledge-guidelines"], button:has-text("I understand")',
-  honorCodeModal: 'div[role="dialog"], div[aria-modal="true"], .cds-Dialog-dialog',
-  honorCodeModalContinueBtn: 'button[data-testid="continue-button"], button[data-action="acknowledge-guidelines"], button:has-text("Continue"), button:has-text("Start assignment"), button:has-text("Start attempt"), button:has-text("Start quiz"), button:has-text("Start"), button:has-text("I understand"), button:has-text("I agree"), button:has-text("Accept")',
+  agreementModal: 'div[role="dialog"], div[aria-modal="true"], .cds-Dialog-dialog',
+  agreementModalContinueBtn: 'button[data-testid="continue-button"], button[data-action="acknowledge-guidelines"], button:has-text("Continue"), button:has-text("Start assignment"), button:has-text("Start attempt"), button:has-text("Start quiz"), button:has-text("Start"), button:has-text("I understand"), button:has-text("I agree"), button:has-text("Accept")',
   
   // Questions
   questionContainer: 'div[data-testid^="part-Submission_"], div[class*="part-Submission_"]',
@@ -49,9 +49,9 @@ export const COURSERA_SEL = {
   optionInput: 'input[type="radio"], input[type="checkbox"]',
   optionLabel: '.cds-checkboxAndRadio-labelText',
 
-  // Honor Code & Submission
-  honorCodeContainer: '[data-testid="HonorCodeAgreement"], [data-testid="agreement-standalone-checkbox"]',
-  honorCodeCheckbox: '#agreement-checkbox-base, [data-testid="agreement-checkbox"] input, [data-testid="agreement-standalone-checkbox"] input',
+  // Assessment Agreement & Submission
+  agreementContainer: '[data-testid="HonorCodeAgreement"], [data-testid="agreement-standalone-checkbox"]',
+  agreementCheckbox: '#agreement-checkbox-base, [data-testid="agreement-checkbox"] input, [data-testid="agreement-standalone-checkbox"] input',
   submitButton: 'button[data-testid="submit-button"]',
   saveDraftButton: 'button[data-testid="save-draft-button"]',
   gradingScreen: '[data-testid="grading-in-progress-screen"]'

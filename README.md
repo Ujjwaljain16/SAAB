@@ -30,7 +30,7 @@ SAAB is engineered as a **learning companion, study auditor, and benchmarking pl
 
 - **Diagnostic / Dry-Run Mode (Recommended)**: Use `npm run dry-run` or `npm run benchmark` to generate explanations, diagnose compilation bugs, and explore step-by-step reasoning without submitting anything to remote portals.
 - **Human-in-the-Loop**: When running live assistance, all submissions are gated by completeness audits, confirmation prompts, and explicit user controls.
-- **Institutional Compliance**: Users are encouraged to utilize SAAB in accordance with their university or academy's academic integrity policies and honor codes.
+- **Institutional Compliance**: Users are encouraged to utilize SAAB in accordance with their institution's learning guidelines and code of conduct.
 
 ---
 

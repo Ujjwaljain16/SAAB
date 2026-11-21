@@ -197,14 +197,14 @@ if (optionNodes.length !== 4) {
 }
 console.log('PASS: Options correctly extracted.');
 
-// 6. Honor Code Checkbox
-console.log('\n6. Testing Honor Code Agreement Detection...');
-const honorCheckbox = findNodes(attemptData.document.root, n => n.attrs?.id === 'agreement-checkbox-base')[0];
-if (!honorCheckbox) {
+// 6. Assessment Agreement Checkbox
+console.log('\n6. Testing Assessment Agreement Detection...');
+const agreementCheckboxNode = findNodes(attemptData.document.root, n => n.attrs?.id === 'agreement-checkbox-base')[0];
+if (!agreementCheckboxNode) {
   console.error('FAIL: agreement-checkbox-base not found!');
   process.exit(1);
 }
-console.log('PASS: Honor code agreement checkbox detected.');
+console.log('PASS: Assessment agreement checkbox detected.');
 
 // 7. Submit button
 console.log('\n7. Testing Submit Button Detection...');
@@ -314,20 +314,20 @@ if (unanswered.length !== 2 || unanswered[0] !== 9 || unanswered[1] !== 10) {
   process.exit(1);
 }
 
-// Safety check: honor code and submission MUST be blocked
-let honorCodeChecked = false;
+// Safety check: agreement confirmation and submission MUST be blocked
+let agreementChecked = false;
 let submitted = false;
 
 if (unanswered.length > 0) {
   // Submission blocked
-  honorCodeChecked = false;
+  agreementChecked = false;
   submitted = false;
 } else {
-  honorCodeChecked = true;
+  agreementChecked = true;
   submitted = true;
 }
 
-if (submitted || honorCodeChecked) {
+if (submitted || agreementChecked) {
   console.error('FAIL: Submission was not blocked despite unanswered questions!');
   process.exit(1);
 }

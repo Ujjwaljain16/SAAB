@@ -6,7 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { BITS_URLS } from './bits_config.js';
 import { discoverDegreeDashboard, crawlCourseOutline, ensureCourseraLoggedIn } from './bits_crawler.js';
-import { solveAndSubmitCourseraAssignment } from './bits_handler.js';
+import { processCourseraAssessment } from './bits_handler.js';
 import { solverStats } from './solver.js';
 import { answerStore } from './answer_indexer.js';
 
@@ -126,7 +126,7 @@ export async function runBits(options = {}) {
     // 1. Direct Assignment Mode
     if (ASSIGNMENT_ARG) {
       console.log(`[BITS] Direct assignment mode requested: ${ASSIGNMENT_ARG}`);
-      const result = await solveAndSubmitCourseraAssignment(page, ASSIGNMENT_ARG, { dryRun: DRY_RUN, answerStore });
+      const result = await processCourseraAssessment(page, ASSIGNMENT_ARG, { dryRun: DRY_RUN, answerStore });
       runLog.push({ url: ASSIGNMENT_ARG, result });
       if (result.status === 'pass') metrics.solved++;
       else if (result.status === 'dry-run') metrics.dryRun++;
@@ -172,7 +172,7 @@ export async function runBits(options = {}) {
         console.log(`   URL:    ${assignment.url}`);
 
         try {
-          const res = await solveAndSubmitCourseraAssignment(page, assignment.url, { dryRun: DRY_RUN, answerStore });
+          const res = await processCourseraAssessment(page, assignment.url, { dryRun: DRY_RUN, answerStore });
           runLog.push({ title: assignment.title, course: assignment.course, url: assignment.url, ...res });
 
           if (res.status === 'pass') metrics.solved++;
@@ -245,7 +245,7 @@ export async function runBits(options = {}) {
 
           console.log(`\n▶ [BITS Module Item] Starting: "${item.title}"`);
           try {
-            const res = await solveAndSubmitCourseraAssignment(page, item.url, { dryRun: DRY_RUN });
+            const res = await processCourseraAssessment(page, item.url, { dryRun: DRY_RUN });
             runLog.push({ title: item.title, course: course.name, url: item.url, ...res });
 
             if (res.status === 'pass') metrics.solved++;

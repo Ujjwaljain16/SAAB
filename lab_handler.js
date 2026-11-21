@@ -7,7 +7,7 @@ import { getProblemSolveState } from './scaler_page.js';
 /**
  * Robust handler to automate DevOps Maxwell Container Labs on Scaler
  */
-export async function solveAndSubmitLab(page, problemTitle, problemStatement, opts = {}) {
+export async function executeLabTask(page, problemTitle, problemStatement, opts = {}) {
     const trace = {};
     const result = await runLab(page, problemTitle, problemStatement, trace, opts);
 
@@ -18,6 +18,8 @@ export async function solveAndSubmitLab(page, problemTitle, problemStatement, op
     }
     return result;
 }
+
+export { executeLabTask as solveAndSubmitLab };
 
 async function runLab(page, problemTitle, problemStatement, trace, opts = {}) {
     // opts.timeScale shrinks the fixed waits (tests use ~0.05); opts.frameWaitAttempts bounds the container wait.

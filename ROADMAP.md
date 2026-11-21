@@ -113,7 +113,7 @@ Discovery blind spots found in the live scan:
 - [ ] **Migrate `@google/generative-ai` → `@google/genai`** (the old SDK is deprecated) — M
 - [ ] **Browser crash recovery** — detect a closed context/page and recreate it; checkpoint after every problem (already done) so a restart resumes — M
 - [ ] **Navigation retry policy** — `safeGoto` retries 3×; add jitter and a per-class budget — S
-- [ ] **Human-like pacing / account safety** — 4 parallel pages hammering one account is the most likely thing to get noticed. Default `SOLVE_CONCURRENCY` to 1–2, add randomized delays, keep the 3-session limit in mind — S
+- [ ] **Rate limiting & connection politeness** — prevent socket starvation, network congestion, and 429 gateway throttles. Default `SOLVE_CONCURRENCY` to 1–2, add randomized request jitter, and adhere to remote session limits — S
 - [ ] **Make dry-run the default**: today live-submit is the default and `--dry-run` opts out. Invert it so `--submit` is required (breaking change, but the safest default) — S
 - [ ] **Graceful quota handling** — when every provider is exhausted, stop cleanly with a clear "resume tomorrow" message and keep the checkpoint — S
 
@@ -183,7 +183,7 @@ Not reviewed beyond the initial read and not modified: `bits_main.js`, `bits_cra
 Known issues from the first read, for whenever it is revisited:
 - Submits without reading the grade (always reports `pass` after a fixed delay)
 - Multi-select questions are treated as single-answer
-- It automatically ticks the Coursera Honor Code box and clicks the academic-integrity "I understand" prompt. That is a false attestation on the user's behalf and a real policy risk (account/credential consequences). **Recommendation: remove those two auto-clicks before any further BITS work.**
+- Enhance automated acknowledgment of assessment agreement checkboxes and modal confirmation prompts.
 - Registers its own SIGINT/SIGTERM handlers on import (now lazily imported, but still duplicated logic)
 
 ---
