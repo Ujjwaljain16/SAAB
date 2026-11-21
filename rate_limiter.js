@@ -11,6 +11,11 @@
 // Adaptive: a 429 (penalize) pauses the lane for the provider's retry delay and halves the effective RPM; it creeps back
 // up by one every 2 quiet minutes. A genuine DAILY exhaustion is persisted (markExhausted) so the next run today does not
 // even try. Pacific time is used because Google resets daily quotas at midnight Pacific.
+//
+// Circuit breaker: non-429 failures (5xx, network errors) are tracked separately. After failureThreshold consecutive
+// failures the circuit opens and the lane is skipped for cooldownMs (default 60 s), then transitions to HALF-OPEN: one
+// probe is allowed; success → CLOSED, failure → OPEN again. 429s never count toward the circuit breaker because they are
+// expected quota behaviour that the QuotaLimiter already handles.
 import fs from 'fs';
 import path from 'path';
 
@@ -31,7 +36,140 @@ export class QuotaExhaustedError extends Error {
   }
 }
 
+/** Thrown by CircuitBreaker.acquire() when the circuit is OPEN and we are not in HALF-OPEN probe mode. */
+export class CircuitOpenError extends Error {
+  constructor(name, remainingMs) {
+    super(`Circuit OPEN for ${name}; remaining cooldown ${Math.ceil(remainingMs / 1000)}s`);
+    this.name = 'CircuitOpenError';
+    this.remainingMs = remainingMs;
+  }
+}
+
 const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ---- Circuit Breaker -------------------------------------------------------------------------
+// Tracks non-quota failures (5xx, network errors, model refusals) per lane independently of the
+// per-minute rate limiter. The state machine is intentionally simple: each lane has exactly one
+// CircuitBreaker, shared across all callers for that lane.
+//
+// CLOSED  — normal operation; failures are counted
+// OPEN    — provider is considered down; acquire() throws immediately
+// HALF-OPEN — cooldown expired; exactly one probe is in flight; on success → CLOSED, on failure → OPEN
+//
+// Design note: 429 quota responses should NOT be fed to markFailure(); the QuotaLimiter already
+// handles them. Only genuine errors (network, 5xx, timeout) should be counted.
+
+const CB_STATES = Object.freeze({ CLOSED: 'CLOSED', OPEN: 'OPEN', HALF_OPEN: 'HALF_OPEN' });
+
+export class CircuitBreaker {
+  /**
+   * @param {object} o
+   * @param {string} o.name
+   * @param {number} [o.failureThreshold]  consecutive failures before OPEN (default 3)
+   * @param {number} [o.cooldownMs]        how long to stay OPEN before allowing a probe (default 60 000)
+   * @param {() => number} [o.now]         injectable clock (tests)
+   */
+  constructor({ name, failureThreshold = 3, cooldownMs = 60_000, now = () => Date.now() }) {
+    this.name = name;
+    this.failureThreshold = failureThreshold;
+    this.cooldownMs = cooldownMs;
+    this.now = now;
+
+    this._state = CB_STATES.CLOSED;
+    this._consecutiveFailures = 0;
+    this._openedAt = 0;
+    this._probeInFlight = false;
+  }
+
+  get state() {
+    this._maybeTransitionFromOpen();
+    return this._state;
+  }
+
+  _maybeTransitionFromOpen() {
+    if (this._state === CB_STATES.OPEN && this.now() - this._openedAt >= this.cooldownMs) {
+      this._state = CB_STATES.HALF_OPEN;
+      this._probeInFlight = false;
+    }
+  }
+
+  /**
+   * Check whether a request is allowed right now.
+   * Throws CircuitOpenError when the lane is OPEN.
+   * Returns true when this call is the HALF-OPEN probe (caller should mark success/failure).
+   * Returns false in CLOSED state (normal path).
+   */
+  checkAndAcquire() {
+    this._maybeTransitionFromOpen();
+
+    if (this._state === CB_STATES.OPEN) {
+      const remaining = this.cooldownMs - (this.now() - this._openedAt);
+      throw new CircuitOpenError(this.name, Math.max(0, remaining));
+    }
+
+    if (this._state === CB_STATES.HALF_OPEN) {
+      if (this._probeInFlight) {
+        // Another concurrent caller already grabbed the probe slot; block this one as if OPEN.
+        throw new CircuitOpenError(this.name, 0);
+      }
+      this._probeInFlight = true;
+      return true; // is probe
+    }
+
+    return false; // CLOSED — normal
+  }
+
+  /** Call after a successful API call. Resets consecutive-failure counter and closes the circuit. */
+  markSuccess() {
+    this._consecutiveFailures = 0;
+    this._probeInFlight = false;
+    if (this._state !== CB_STATES.CLOSED) {
+      console.log(`  [Circuit] ${this.name}: CLOSED (probe succeeded).`);
+    }
+    this._state = CB_STATES.CLOSED;
+  }
+
+  /**
+   * Call after a non-quota failure (5xx, network, timeout).
+   * Do NOT call this for 429 rate-limit responses; the QuotaLimiter handles those.
+   * @param {Error|unknown} [err]
+   */
+  markFailure(err) {
+    this._consecutiveFailures += 1;
+    this._probeInFlight = false;
+
+    if (this._state === CB_STATES.HALF_OPEN || this._consecutiveFailures >= this.failureThreshold) {
+      this._state = CB_STATES.OPEN;
+      this._openedAt = this.now();
+      const coolSec = Math.ceil(this.cooldownMs / 1000);
+      const reason = err?.message ? err.message.slice(0, 80) : 'unknown error';
+      console.warn(`  [Circuit] ${this.name}: OPEN for ${coolSec}s after ${this._consecutiveFailures} failure(s). Last: "${reason}"`);
+    }
+  }
+
+  /** Remaining cooldown in ms (0 when CLOSED or HALF-OPEN). */
+  remainingCooldownMs() {
+    if (this._state !== CB_STATES.OPEN) return 0;
+    return Math.max(0, this.cooldownMs - (this.now() - this._openedAt));
+  }
+
+  isOpen() {
+    return this.state === CB_STATES.OPEN;
+  }
+
+  isClosed() {
+    return this.state === CB_STATES.CLOSED;
+  }
+
+  stats() {
+    return {
+      name: this.name,
+      state: this.state,
+      consecutiveFailures: this._consecutiveFailures,
+      remainingCooldownMs: this.remainingCooldownMs()
+    };
+  }
+}
 
 export class QuotaLimiter {
   /**

@@ -132,7 +132,8 @@ function createRunMetrics() {
     problemsFailed: 0,
     problemsSkipped: 0,
     solveAttempts: 0,
-    submitAttempts: 0
+    submitAttempts: 0,
+    pageRecoveries: 0
   };
 }
 
@@ -151,6 +152,9 @@ function printRunSummary(metrics, log) {
   console.log(`Skipped: ${metrics.problemsSkipped}`);
   console.log(`Solve attempts: ${metrics.solveAttempts}`);
   console.log(`Submit attempts: ${metrics.submitAttempts}`);
+  if (metrics.pageRecoveries > 0) {
+    console.log(`Page recoveries: ${metrics.pageRecoveries}`);
+  }
   console.log(`Elapsed: ${elapsedSec}s`);
   console.log(`Provider requests: Gemini ${solverStats.geminiRequests}, Groq ${solverStats.groqRequests}, Grok ${solverStats.grokRequests}`);
   console.log(`Cache hits: ${solverStats.cacheHits}, misses: ${solverStats.cacheMisses}`);
@@ -181,8 +185,12 @@ async function safeGoto(page, url, options = {}) {
       const isAbort = /ERR_ABORTED|net::ERR_|aborted/i.test(err.message || '');
       const isTimeout = err.name === 'TimeoutError' || /timeout/i.test(err.message || '');
       if (attempt < maxRetries && (isAbort || isTimeout)) {
-        console.log(`  [safeGoto] Navigation to ${url.slice(0, 65)} failed (${isAbort ? 'ERR_ABORTED' : 'timeout'}). Retrying (attempt ${attempt + 1}/${maxRetries})...`);
-        await DELAY(1500 * attempt);
+        // Exponential backoff with ±25% random jitter to avoid concurrent worker stampedes
+        const baseDelay = 1500 * attempt;
+        const jitter = (Math.random() * 0.5 - 0.25) * baseDelay;
+        const delayMs = Math.round(baseDelay + jitter);
+        console.log(`  [safeGoto] Navigation to ${url.slice(0, 65)} failed (${isAbort ? 'ERR_ABORTED' : 'timeout'}). Retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries})...`);
+        await DELAY(delayMs);
         continue;
       }
       throw err;
@@ -418,7 +426,9 @@ async function run() {
       const workerPages = [];
       workerPages.push(mainPage); // Main page serves as worker 0
       for (let i = 1; i < poolSize; i++) {
-        workerPages.push(await ctx.newPage());
+        const workerPage = await ctx.newPage();
+        workerPage.on('crash', () => console.warn(`  [Worker ${i}] Page crash detected.`));
+        workerPages.push(workerPage);
       }
 
       let problemQueueIndex = 0;
@@ -973,8 +983,10 @@ async function run() {
                 break;
               }
               pageRecoveries += 1;
+              metrics.pageRecoveries += 1;
               try {
                 page = await ctx.newPage();
+                page.on('crash', () => console.warn(`  [Worker ${workerId}] Page crash detected.`));
                 workerPages[workerId] = page;
                 console.log(`  [Worker ${workerId}] Opened a fresh page (recovery ${pageRecoveries}/2).`);
               } catch (openErr) {

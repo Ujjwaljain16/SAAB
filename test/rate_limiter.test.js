@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { QuotaLimiter, QuotaExhaustedError, pacificDay } from '../rate_limiter.js';
+import { QuotaLimiter, QuotaExhaustedError, CircuitBreaker, CircuitOpenError, pacificDay } from '../rate_limiter.js';
 
 // A fake clock: sleep() just advances time, so minutes of waiting run instantly.
 function fakeClock(start = Date.UTC(2026, 9, 17, 12, 0, 0)) {
@@ -127,4 +127,74 @@ test('loadMs reflects queued callers so keys can be balanced', async () => {
 test('pacificDay uses Pacific time (Google resets daily quotas at midnight Pacific)', () => {
   assert.equal(pacificDay(new Date('2026-10-17T06:59:00Z')), '2026-10-16');
   assert.equal(pacificDay(new Date('2026-10-17T07:01:00Z')), '2026-10-17');
+});
+
+test('CircuitBreaker opens after failureThreshold consecutive non-quota failures and rejects calls', () => {
+  const c = fakeClock();
+  const cb = new CircuitBreaker({ name: 'test-cb', failureThreshold: 3, cooldownMs: 30000, now: c.now });
+  assert.equal(cb.state, 'CLOSED');
+  assert.equal(cb.isOpen(), false);
+  assert.equal(cb.isClosed(), true);
+
+  // Normal acquire in CLOSED state returns false (not a probe)
+  assert.equal(cb.checkAndAcquire(), false);
+
+  cb.markFailure(new Error('500 internal server error'));
+  assert.equal(cb.state, 'CLOSED');
+  cb.markFailure(new Error('503 service unavailable'));
+  assert.equal(cb.state, 'CLOSED');
+
+  // Third failure trips the circuit
+  cb.markFailure(new Error('network timeout'));
+  assert.equal(cb.state, 'OPEN');
+  assert.equal(cb.isOpen(), true);
+
+  // Calls while OPEN throw CircuitOpenError
+  assert.throws(() => cb.checkAndAcquire(), (err) => {
+    assert.ok(err instanceof CircuitOpenError);
+    assert.match(err.message, /Circuit OPEN for test-cb/);
+    return true;
+  });
+});
+
+test('CircuitBreaker transitions to HALF-OPEN after cooldown, allows one probe, and closes on success', () => {
+  const c = fakeClock();
+  const cb = new CircuitBreaker({ name: 'test-cb', failureThreshold: 2, cooldownMs: 30000, now: c.now });
+  cb.markFailure(new Error('fail 1'));
+  cb.markFailure(new Error('fail 2'));
+  assert.equal(cb.isOpen(), true);
+
+  // Advance time past cooldown
+  c.t += 35000;
+  assert.equal(cb.state, 'HALF_OPEN');
+
+  // First caller gets the probe slot
+  const isProbe = cb.checkAndAcquire();
+  assert.equal(isProbe, true);
+
+  // Concurrent caller while probe in flight is blocked
+  assert.throws(() => cb.checkAndAcquire(), CircuitOpenError);
+
+  // Probe succeeds -> CLOSED
+  cb.markSuccess();
+  assert.equal(cb.state, 'CLOSED');
+  assert.equal(cb.isClosed(), true);
+  assert.equal(cb.stats().consecutiveFailures, 0);
+});
+
+test('CircuitBreaker transitions back to OPEN if the probe fails in HALF-OPEN', () => {
+  const c = fakeClock();
+  const cb = new CircuitBreaker({ name: 'test-cb', failureThreshold: 2, cooldownMs: 30000, now: c.now });
+  cb.markFailure(new Error('fail 1'));
+  cb.markFailure(new Error('fail 2'));
+  assert.equal(cb.isOpen(), true);
+
+  c.t += 30000;
+  assert.equal(cb.state, 'HALF_OPEN');
+
+  cb.checkAndAcquire(); // probe taken
+  cb.markFailure(new Error('probe failed'));
+
+  assert.equal(cb.state, 'OPEN');
+  assert.equal(cb.isOpen(), true);
 });

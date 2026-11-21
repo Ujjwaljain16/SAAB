@@ -1,10 +1,10 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { dataPath, envNumber } from './paths.js';
-import { QuotaLimiter } from './rate_limiter.js';
+import { QuotaLimiter, CircuitBreaker, CircuitOpenError } from './rate_limiter.js';
 import { extractJsonBlock, hasBalancedBrackets, looksTruncated, extractLikelyCode, stripCodeComments } from './code_utils.js';
 
 export { looksTruncated };
@@ -59,7 +59,8 @@ function getApiKeys() {
 }
 
 const API_KEYS = getApiKeys();
-const CLIENTS = API_KEYS.map((k) => new GoogleGenerativeAI(k));
+// @google/genai SDK: one GoogleGenAI instance per key; model is chosen per-call, not at client construction time.
+const CLIENTS = API_KEYS.map((k) => new GoogleGenAI({ apiKey: k }));
 
 // ---- Gemini model pool ---------------------------------------------------------------------------------------------------------------
 // Free-tier quota is per PROJECT and PER MODEL (see the AI Studio rate-limit table), so one key can serve several models, each with its
@@ -105,10 +106,16 @@ const slotName = (slot) => `${GEMINI_SLOTS[slot].model} key ${GEMINI_SLOTS[slot]
 // Gemma (and anything that is not a Gemini model) is text-only here: image questions must never be routed to it.
 const slotSupportsVision = (slot) => /^gemini/i.test(GEMINI_SLOTS[slot].model);
 // Gemma rejects JSON mode with a 500, so only Gemini models get responseMimeType; the reply is parsed leniently either way.
+// New @google/genai SDK: generation config goes in `config` not `generationConfig`.
 const jsonConfig = (slot, extra = {}) =>
   /^gemma/i.test(GEMINI_SLOTS[slot].model) ? { ...extra } : { responseMimeType: 'application/json', ...extra };
 
-// A slot is unusable for today if a 429 said so (this run) or the persisted daily budget/exhaustion flag says so (earlier runs).
+// One CircuitBreaker per Gemini slot (tracks 5xx / network failures independently of quota 429s).
+const slotCircuitBreakers = GEMINI_SLOTS.map((_, i) =>
+  new CircuitBreaker({ name: `gemini:${i}` })
+);
+
+// A slot is unusable for today if a 429 said so (this run), persisted daily budget says so, or circuit breaker is OPEN.
 function isGeminiKeyDead(slot) {
   return deadGeminiKeys.has(slot) || getLimiter(`gemini:${slot}`).isExhausted();
 }
@@ -118,14 +125,27 @@ function markGeminiKeyDead(slot) {
   getLimiter(`gemini:${slot}`).markExhausted();
 }
 
+function circuitBreakerFor(slot) {
+  return slotCircuitBreakers[slot];
+}
+
+/** Returns true when this slot is unusable: exhausted OR circuit is OPEN (and not ready for HALF-OPEN probe). */
+function isGeminiSlotBlocked(slot, { vision = false } = {}) {
+  if (isGeminiKeyDead(slot)) return true;
+  if (vision && !slotSupportsVision(slot)) return true;
+  const cb = circuitBreakerFor(slot);
+  return cb ? cb.isOpen() : false;
+}
+
 /**
  * Usable slots, best first: anything that can send right now beats anything that would have to queue, then model priority, then the
  * least-loaded key, so work spreads across keys and spills to the next model when the preferred one is at its per-minute cap.
+ * Circuit-open slots are excluded so a broken provider never blocks the queue.
  */
 function geminiKeyOrder({ vision = false } = {}) {
   const QUEUE_MS = 2500;
   return GEMINI_SLOTS.map((_, s) => s)
-    .filter((s) => !isGeminiKeyDead(s) && (!vision || slotSupportsVision(s)))
+    .filter((s) => !isGeminiSlotBlocked(s, { vision }))
     .sort((a, b) => {
       const la = getLimiter(`gemini:${a}`);
       const lb = getLimiter(`gemini:${b}`);
@@ -177,7 +197,8 @@ function nextGeminiClientIndex(options) {
   return order.length > 0 ? order[0] : -1;
 }
 
-/** True when every configured provider has hit its daily quota: there is nothing left to try today. */
+/** True when every configured provider has hit its daily quota: there is nothing left to try today.
+ * Note: circuit-open slots are temporarily blocked (server errors) but NOT quota-exhausted, so they don't trigger this. */
 export function allProvidersExhausted() {
   const geminiOk = GEMINI_SLOTS.some((_, s) => !isGeminiKeyDead(s));
   const groqOk = Boolean(GROQ_API_KEY) && GROQ_MODELS.concat(GROQ_MODEL).some((m) => !deadGroqModels.has(m));
@@ -801,6 +822,81 @@ export function getQuotaReport() {
   return Array.from(limiters.values()).map((limiter) => limiter.usage());
 }
 
+// ---- Unified Gemini call helper ------------------------------------------------------------------
+// Wraps the new @google/genai SDK call with:
+//   • QuotaLimiter pacing (paceApiCall)
+//   • CircuitBreaker — skips OPEN circuits; marks failure on 5xx/network; marks success on 2xx
+//   • Returns { ok, text } on success; { ok: false, type, ... } on any error
+//
+// `contents`  — @google/genai contents array (same inlineData parts format as old SDK)
+// `config`    — @google/genai config object (responseMimeType, maxOutputTokens, temperature, …)
+// `clientIdx` — GEMINI_SLOTS index to use for this call
+async function callGemini(clientIdx, contents, config = {}) {
+  const cb = circuitBreakerFor(clientIdx);
+
+  let isProbe = false;
+  if (cb) {
+    try {
+      isProbe = cb.checkAndAcquire(); // throws CircuitOpenError if OPEN
+    } catch (err) {
+      if (err instanceof CircuitOpenError) {
+        return {
+          ok: false,
+          type: 'circuit_open',
+          message: err.message,
+          remainingMs: err.remainingMs
+        };
+      }
+      throw err;
+    }
+  }
+
+  try {
+    await paceApiCall(`gemini:${clientIdx}`);
+  } catch (err) {
+    cb?.markFailure(err);
+    return { ok: false, type: 'rate_limit', retryAfterSeconds: 60, fatal: true, message: err.message };
+  }
+
+  const slot = GEMINI_SLOTS[clientIdx];
+  let result;
+  try {
+    result = await slot.client.models.generateContent({
+      model: slot.model,
+      contents,
+      config
+    });
+  } catch (err) {
+    const is429 = err?.status === 429 || /429|quota|resource_exhausted/i.test(err?.message || '');
+    if (is429) {
+      // 429 is quota behaviour — handled by QuotaLimiter, NOT counted as a circuit failure.
+      const retrySec = parseRetryDelaySeconds(err);
+      penalizeLane(`gemini:${clientIdx}`, retrySec);
+      solverStats.rateLimits++;
+      if (isDailyQuotaExceeded(err)) {
+        markGeminiKeyDead(clientIdx);
+        return { ok: false, type: 'rate_limit', retryAfterSeconds: 86400, fatal: true, message: err.message };
+      }
+      return { ok: false, type: 'rate_limit', retryAfterSeconds: retrySec, fatal: false, message: err.message };
+    }
+    if (isRetryableServerError(err)) {
+      solverStats.serverErrors++;
+      cb?.markFailure(err);
+      return { ok: false, type: 'server_error', message: err.message };
+    }
+    // Non-retryable client error
+    solverStats.providerFailures++;
+    cb?.markFailure(err);
+    return { ok: false, type: 'solver_error', message: err?.message || String(err) };
+  }
+
+  cb?.markSuccess();
+  solverStats.geminiRequests++;
+  // @google/genai returns result.text directly (string)
+  const text = typeof result.text === 'string' ? result.text : '';
+  return { ok: true, text };
+}
+
 export async function solve(questionText, testCases, language, options = {}) {
   if (CLIENTS.length === 0 && !GROK_API_KEY && !GROQ_API_KEY) {
     return {
@@ -887,48 +983,29 @@ ${starterSignatures.length ? `\nMandatory Java Signatures:\n- ${starterSignature
 
     for (const i of (shouldSkipGemini() ? [] : geminiKeyOrder())) {
       if (shouldSkipGemini()) break;
-      const model = GEMINI_SLOTS[i].client.getGenerativeModel({ model: GEMINI_SLOTS[i].model });
-      let result;
 
-      try {
-        await paceApiCall(`gemini:${i}`);
-        solverStats.geminiRequests += 1;
-        result = await model.generateContent({
-          contents: [{ role: 'user', parts: [{ text: attemptPrompt }] }],
-          generationConfig: {
-            maxOutputTokens: MAX_OUTPUT_TOKENS,
-            temperature: 0.2
-          }
-        });
-      } catch (error) {
-        if (error?.status === 429) {
-          solverStats.rateLimits += 1;
+      const gResult = await callGemini(i,
+        [{ role: 'user', parts: [{ text: attemptPrompt }] }],
+        { maxOutputTokens: MAX_OUTPUT_TOKENS, temperature: 0.2 }
+      );
+
+      if (!gResult.ok) {
+        if (gResult.type === 'circuit_open') continue;
+        if (gResult.type === 'rate_limit') {
           sawRateLimit = true;
-          const retrySec = parseRetryDelaySeconds(error);
-          penalizeLane(`gemini:${i}`, retrySec);
-          minRetrySeconds = Math.min(minRetrySeconds, retrySec);
-
-          if (isDailyQuotaExceeded(error)) {
-            markGeminiKeyDead(i);
-            continue;
-          }
-
+          minRetrySeconds = Math.min(minRetrySeconds, Number(gResult.retryAfterSeconds || 5));
           continue;
         }
-
-        if (isRetryableServerError(error)) {
-          solverStats.serverErrors += 1;
+        if (gResult.type === 'server_error') {
           sawRateLimit = true;
           minRetrySeconds = Math.min(minRetrySeconds, 10);
           continue;
         }
-
-        console.error(`Error asking Gemini key ${i + 1} to solve:`, error?.message);
-        solverStats.providerFailures += 1;
+        console.error(`Error asking Gemini key ${i + 1} to solve:`, gResult.message);
         continue;
       }
 
-      const code = stripCodeComments(extractLikelyCode(result.response.text() || ''), language);
+      const code = stripCodeComments(extractLikelyCode(gResult.text || ''), language);
 
       if (code.length > bestCandidate.length) {
         bestCandidate = code;
@@ -1220,39 +1297,30 @@ ${exampleOutput}`;
       if (clientIdx < 0) break;
       // After a 429 the paused key would stall us for the retry delay: go to the fallback instead (never for image questions).
       if (!screenshot64 && shouldSkipGemini()) break;
-      const client = GEMINI_SLOTS[clientIdx].client;
 
-      try {
-        await paceApiCall(`gemini:${clientIdx}`);
-        const model = client.getGenerativeModel({
-          model: GEMINI_SLOTS[clientIdx].model,
-          generationConfig: jsonConfig(clientIdx, { temperature: 0.1 })
-        });
-        solverStats.geminiRequests++;
-        const result = await model.generateContent({ contents: buildContents() });
-        const text = result.response.text();
-        const normalized = parseModelOutput(text);
-        if (normalized) {
-          return { ...normalized, cacheKey };
-        }
-      } catch (e) {
-        const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(e.message || '');
-        if (is429) {
-          penalizeLane(`gemini:${clientIdx}`, parseRetryDelaySeconds(e));
-          solverStats.rateLimits++;
-          if (isDailyQuotaExceeded(e)) { markGeminiKeyDead(clientIdx); console.log(`    Gemini MCQ ${slotName(clientIdx)} is out of daily quota; skipping it for the rest of this run.`); continue; }
-          // No local sleep: penalizeLane() above already made this key's lane wait out the provider's retry delay.
-          console.log(`    Gemini MCQ ${slotName(clientIdx)} rate-limited; its lane is paused for ${Math.ceil(getLaneCooldownMs(`gemini:${clientIdx}`) / 1000)}s.`);
+      const mcqConfig = jsonConfig(clientIdx, { temperature: 0.1 });
+      const gResult = await callGemini(clientIdx, buildContents(), mcqConfig);
+
+      if (!gResult.ok) {
+        if (gResult.type === 'circuit_open') continue;
+        if (gResult.type === 'rate_limit') {
+          if (gResult.fatal) { console.log(`    Gemini MCQ ${slotName(clientIdx)} is out of daily quota; skipping it for the rest of this run.`); }
+          else { console.log(`    Gemini MCQ ${slotName(clientIdx)} rate-limited; its lane is paused for ${Math.ceil(getLaneCooldownMs(`gemini:${clientIdx}`) / 1000)}s.`); }
           continue;
         }
-        if (isRetryableServerError(e)) {
-          solverStats.serverErrors++;
+        if (gResult.type === 'server_error') {
           const waitMs = Math.min(3000 * (tryCount + 1), 12000);
           console.log(`    Gemini MCQ retryable error (${slotName(clientIdx)}): retrying in ${waitMs / 1000}s...`);
           await new Promise(r => setTimeout(r, waitMs));
           continue;
         }
-        console.log('    Gemini MCQ solver error:', e.message?.slice(0, 120));
+        console.log('    Gemini MCQ solver error:', gResult.message?.slice(0, 120));
+        continue;
+      }
+
+      const normalized = parseModelOutput(gResult.text);
+      if (normalized) {
+        return { ...normalized, cacheKey };
       }
     }
   }
@@ -1360,28 +1428,25 @@ Keep non-modified files UNCHANGED (do not include them in fileMap).
       const clientIdx = nextGeminiClientIndex();
       if (clientIdx < 0) break;
       if (shouldSkipGemini()) break;
-      const client = GEMINI_SLOTS[clientIdx].client;
-      try {
-        await paceApiCall(`gemini:${clientIdx}`);
-        const model = client.getGenerativeModel({ model: GEMINI_SLOTS[clientIdx].model, generationConfig: jsonConfig(clientIdx) });
-        solverStats.geminiRequests++;
-        const result = await model.generateContent(prompt);
-        const text = result.response.text();
-        return extractJsonBlock(text);
-      } catch(e) {
-        const errMsg = e.message || String(e);
-        console.log(`    Gemini Workspace ${slotName(clientIdx)} failed: ${errMsg.slice(0, 100)}...`);
-        const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(errMsg);
-        if (is429) {
-          penalizeLane(`gemini:${clientIdx}`, parseRetryDelaySeconds(e));
-          if (isDailyQuotaExceeded(e)) { markGeminiKeyDead(clientIdx); continue; }
-          await new Promise(r => setTimeout(r, 2000 * (tryCount + 1)));
-          continue;
-        }
-        if (isRetryableServerError(e)) {
-          await new Promise(r => setTimeout(r, 2500 * (tryCount + 1)));
-          continue;
-        }
+
+      const wsConfig = jsonConfig(clientIdx);
+      const gResult = await callGemini(clientIdx,
+        [{ role: 'user', parts: [{ text: prompt }] }],
+        wsConfig
+      );
+      if (gResult.ok) {
+        return extractJsonBlock(gResult.text);
+      }
+      const errMsg = gResult.message || '';
+      console.log(`    Gemini Workspace ${slotName(clientIdx)} failed: ${errMsg.slice(0, 100)}...`);
+      if (gResult.type === 'circuit_open') continue;
+      if (gResult.type === 'rate_limit') {
+        if (!gResult.fatal) await new Promise(r => setTimeout(r, 2000 * (tryCount + 1)));
+        continue;
+      }
+      if (gResult.type === 'server_error') {
+        await new Promise(r => setTimeout(r, 2500 * (tryCount + 1)));
+        continue;
       }
     }
   }
@@ -1457,43 +1522,32 @@ Rules:
       const clientIdx = nextGeminiClientIndex();
       if (clientIdx < 0) break;
       if (shouldSkipGemini()) break;
-      const client = GEMINI_SLOTS[clientIdx].client;
 
-      try {
-        await paceApiCall(`gemini:${clientIdx}`);
-        const model = client.getGenerativeModel({
-          model: GEMINI_SLOTS[clientIdx].model,
-          generationConfig: jsonConfig(clientIdx, { temperature: 0.1 })
-        });
-        solverStats.geminiRequests++;
-        const result = await model.generateContent(prompt);
-        const text = result.response.text();
-        const parsed = extractJsonBlock(text);
+      const labConfig = jsonConfig(clientIdx, { temperature: 0.1 });
+      const gResult = await callGemini(clientIdx,
+        [{ role: 'user', parts: [{ text: prompt }] }],
+        labConfig
+      );
+      if (gResult.ok) {
+        const parsed = extractJsonBlock(gResult.text);
         if (Array.isArray(parsed?.commands) && parsed.commands.length > 0) {
           return { ...parsed, cacheKey };
         }
-      } catch (e) {
-        const is429 = e.status === 429 || /429|quota|resource_exhausted/i.test(e.message || '');
-        if (is429) {
-          penalizeLane(`gemini:${clientIdx}`, parseRetryDelaySeconds(e));
-          solverStats.rateLimits++;
-          if (isDailyQuotaExceeded(e)) {
-            markGeminiKeyDead(clientIdx);
-            console.log(`    Gemini ${slotName(clientIdx)} is out of daily quota; skipping it for the rest of this run.`);
-            continue;
-          }
-          console.log(`    Gemini ${slotName(clientIdx)} rate-limited (429); its lane is paused for ${Math.ceil(getLaneCooldownMs(`gemini:${clientIdx}`) / 1000)}s.`);
-          continue;
-        }
-        if (isRetryableServerError(e)) {
-          solverStats.serverErrors++;
-          const waitMs = Math.min(3000 * (tryCount + 1), 12000);
-          console.log(`    Gemini Lab retryable error (${slotName(clientIdx)}): "${e.message?.slice(0, 80)}". Retrying in ${waitMs / 1000}s...`);
-          await new Promise(r => setTimeout(r, waitMs));
-          continue;
-        }
-        console.log('    Gemini Lab solver error:', e.message?.slice(0, 120));
+        continue;
       }
+      if (gResult.type === 'circuit_open') continue;
+      if (gResult.type === 'rate_limit') {
+        if (gResult.fatal) { console.log(`    Gemini ${slotName(clientIdx)} is out of daily quota; skipping it for the rest of this run.`); }
+        else { console.log(`    Gemini ${slotName(clientIdx)} rate-limited (429); its lane is paused for ${Math.ceil(getLaneCooldownMs(`gemini:${clientIdx}`) / 1000)}s.`); }
+        continue;
+      }
+      if (gResult.type === 'server_error') {
+        const waitMs = Math.min(3000 * (tryCount + 1), 12000);
+        console.log(`    Gemini Lab retryable error (${slotName(clientIdx)}): "${gResult.message?.slice(0, 80)}". Retrying in ${waitMs / 1000}s...`);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      console.log('    Gemini Lab solver error:', gResult.message?.slice(0, 120));
     }
   }
 
