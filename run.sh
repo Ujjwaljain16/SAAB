@@ -2,7 +2,7 @@
 set -e
 
 echo "============================================================"
-echo "  SAAB — Autonomous Academic Solver & Mission Control"
+echo "  SAAB — Student Academic Assistant & Benchmarking Suite"
 echo "============================================================"
 echo ""
 

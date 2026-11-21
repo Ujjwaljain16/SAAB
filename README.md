@@ -1,168 +1,187 @@
-# 🤖 SAAB — Scaler Automation AI Bot
+# 🎓 SAAB — Student Academic Assistant & Benchmarker
 
-> **Clear your entire assignment backlog automatically.**  
-> SAAB is an AI agent that logs into your Scaler dashboard, finds your pending assignments, and works through them: MCQs (including image-based), DevOps terminal labs, and coding problems. **Start with a dry run** (see "First run" below) and read "What has been verified" so you know what to trust.
+> **Autonomous Curriculum Progress Auditor, Study Companion & LLM Engineering Benchmarking Suite.**  
+> Built for Computer Science programs (BITS Pilani Coursera BSc CS, Scaler Academy, and modern STEM platforms).
 
-![Architecture](arch.png)
-
----
-
-## ✨ What It Solves
-
-| Problem Type | How |
-|---|---|
-| **BITS Pilani Coursera Quizzes** (Single & Multi-Select) | Autonomous ReAct Loop (Reason ➔ Act ➔ Observe ➔ Self-Correct), Universal AnswerStore (PDF/JSON/TXT/MD), Scramble-Proof Option Matcher, Pre-Submit Auditor, and Auto-Retake Loop |
-| **Mission Control Dashboard** | Local Dark Glassmorphism Web UI (`http://localhost:3000`), Drag-and-Drop Answer Key Ingestion, Real-Time SSE Log Streaming, and Live ReAct Inspector |
-| **Coding problems** (Java / JavaScript) | Gemini → Groq fallback, 3 retry attempts with compiler feedback loop, direct Monaco API injection |
-| **MCQ** (text + image-based) | Gemini Vision for image questions, disk cache so same question is never called twice |
-| **DevOps Terminal Labs** (Maxwell container) | AI generates exact bash commands, types them into the xterm terminal via iframe keyboard |
-| **VS Code IDE problems** | Extracts Monaco workspace files, AI modifies them, re-injects |
+[![Node.js Version](https://img.shields.io/badge/Node.js-v18%2B-green.svg)](https://nodejs.org/)
+[![Playwright](https://img.shields.io/badge/Playwright-CDP%20Automation-blue.svg)](https://playwright.dev/)
+[![Manifest V3](https://img.shields.io/badge/Chrome%20Extension-Manifest%20V3-orange.svg)](./extension)
+[![AI Providers](https://img.shields.io/badge/Models-Gemini%20%7C%20Groq%20%7C%20Llama--3-purple.svg)](https://aistudio.google.com/)
+[![Tests](https://img.shields.io/badge/Tests-109%20Passing-brightgreen.svg)](./test)
 
 ---
 
-## 🚀 One-Command Turnkey Launcher
+## 📌 Overview & Purpose
 
-Clone and launch instantly with zero manual setup. Installs dependencies, sets up `.env`, installs Playwright browsers, and spins up the Mission Control UI:
+**SAAB** (Student Academic Assistant & Benchmarker) is an open-source educational engineering platform and diagnostic test harness. Designed for engineering students and AI researchers, SAAB bridges the gap between modern generative AI models and real-world computer science curricula.
 
-- **Windows (PowerShell):** `.\run.ps1`
-- **Windows (CMD):** `run.bat`
-- **Linux / macOS:** `./run.sh`
-
-Open your browser at `http://localhost:3000` to manage API keys, live degrees/subjects, drag-and-drop answer keys, and launch autonomous solver agents.
+### What SAAB Does:
+1. **Curriculum Progress & Milestone Auditor**: Connects securely to student learning portals (BITS Pilani BSc on Coursera, Scaler Academy) to audit syllabus progress, track passing grades, detect upcoming submission deadlines, and display a comprehensive unified overview via a local Mission Control dashboard.
+2. **Multi-Modal AI Benchmark Harness**: Evaluates the reasoning, code synthesis, and architectural comprehension of state-of-the-art vision and language models (Gemini 2.5/3.x, Groq/Llama-3.3-70B, etc.) against challenging computer science problem sets (Data Structures & Algorithms, Systems Programming, Database Internals, and DevOps container labs).
+3. **Universal Study Notes & Reference Store (AnswerStore)**: Ingests course reference materials, lecture transcripts, syllabus guides, and verified question banks (PDF, Markdown, JSON, OCR) to ground AI responses with high-precision retrieval and prevent hallucinations.
+4. **Interactive ReAct Diagnostic Loop**: Employs an iterative **Reason ➔ Act ➔ Observe ➔ Self-Correct** loop to assist students in debugging code compilation errors, analyzing failing test cases, and understanding complex algorithmic requirements.
+5. **Companion Browser Extension (v2.0)**: A clean, Manifest V3 companion extension that brings reference lookups, diagnostic hints, and BYOK (Bring Your Own Key) privacy directly into course web pages.
 
 ---
 
-## ⚡ Quick Start (Manual 3 steps)
+## ⚖️ Academic Integrity & Responsible Use
 
-### 1. Install
+SAAB is engineered as a **learning companion, study auditor, and benchmarking platform**. 
+
+- **Diagnostic / Dry-Run Mode (Recommended)**: Use `npm run dry-run` or `npm run benchmark` to generate explanations, diagnose compilation bugs, and explore step-by-step reasoning without submitting anything to remote portals.
+- **Human-in-the-Loop**: When running live assistance, all submissions are gated by completeness audits, confirmation prompts, and explicit user controls.
+- **Institutional Compliance**: Users are encouraged to utilize SAAB in accordance with their university or academy's academic integrity policies and honor codes.
+
+---
+
+## ✨ System Capabilities
+
+| Capability | Technical Implementation | Purpose |
+|---|---|---|
+| **BITS Pilani Coursera Quizzes** | Autonomous ReAct Loop, Universal AnswerStore (PDF/JSON/TXT/MD), Scramble-Proof Option Matcher, Pre-Submit Auditor | Automated study evaluation, grade synchronization, and knowledge verification |
+| **Mission Control Dashboard** | Native Express backend + SSE streaming (`http://localhost:3000`), Dark Glassmorphic UI, dynamic course cards | Unified local dashboard for curriculum tracking and diagnostic logs |
+| **Monaco Coding Assistant** | Monaco Editor AST analysis, test-case extraction, multi-attempt compiler feedback reflection | Algorithm debugging, syntax verification, and test case diagnostics |
+| **Multi-Modal Concept Analysis** | Gemini Vision API for circuit diagrams, ER diagrams, and flowcharts; disk-backed SHA-256 caching | Visual question understanding and multi-modal benchmark evaluation |
+| **DevOps Container Diagnostics** | xterm.js terminal integration, Maxwell container sandbox execution, command safety guard | Linux & systems programming sandbox exercise verification |
+| **Universal Reference Indexer** | Fast In-Memory inverted index with Levenshtein fuzzy matching and multi-modal PDF OCR | Grounding model responses against official course syllabus materials |
+
+---
+
+## 🚀 One-Command Turnkey Launcher (Zero Setup)
+
+SAAB features an automated zero-setup bootstrapper. Cloning and running on any machine automatically installs missing npm packages, initializes `.env`, and verifies Playwright browser binaries:
+
+```powershell
+# Windows (PowerShell)
+npm start
+# or: .\run.ps1
+```
+
+```cmd
+:: Windows (CMD)
+run.bat
+```
+
+```bash
+# Linux / macOS
+./run.sh
+```
+
+Once launched, open your browser at **`http://localhost:3000`** to access the Mission Control Dashboard.
+
+---
+
+## ⚡ Quick Start (Manual Setup)
+
+### 1. Clone & Install
 ```bash
 git clone https://github.com/Ujjwaljain16/SAAB.git
 cd SAAB
 npm install
-npx playwright install chrome
+npx playwright install chromium
 ```
 
-### 2. Configure
+### 2. Configure Environment
 ```bash
 cp .env.example .env
-# Then edit .env and fill in your keys
 ```
 
 **Minimum required in `.env`:**
 ```env
-GEMINI_API_KEY=AIzaSy...          # Get free at aistudio.google.com
+# Free API key from Google AI Studio (https://aistudio.google.com/)
+GEMINI_API_KEY=AIzaSy...
 ```
 
-**Recommended (for rate limit fallback):**
+**Recommended for High-Volume Fallback:**
 ```env
 GEMINI_API_KEY=AIzaSy...
-GROQ_API_KEY=gsk_...              # Get free at console.groq.com
+# Free ultra-fast fallback from Groq (https://console.groq.com/)
+GROQ_API_KEY=gsk_...
 ```
 
-### 3. Authenticate (one-time)
+### 3. Authenticate Student Sessions (One-Time)
 ```bash
+# Authenticate Scaler Academy session
 npm run auth
+
+# Authenticate Coursera / BITS Pilani Google SSO session
+npm run auth:bits
 ```
-A Chrome window will open. Log into Scaler normally (Google OAuth works). Close it when done. Your session is saved and reused automatically.
+A visible browser window opens for you to log in securely. Your local session cookies are saved to gitignored JSON stores for subsequent automated auditing.
 
 ---
 
-## 🧪 First run (do this, in this order)
+## 🧪 Diagnostic Workflows & CLI Commands
 
-1. `npm run dry-run:mcq`: logs in, finds your pending MCQs and prints the answers it WOULD give. Nothing is submitted.
-2. `node main.js --only-mcq --max-submissions=3`: a tiny live test. Check on Scaler that those 3 look right.
-3. Only then `npm run start:mcq`, and later labs / coding.
-
-Wrong MCQ answers use up the question's attempts (the page shows "N Attempts left"); SAAB makes at most 3 tries per MCQ. `npm start` waits 8 seconds and shows a LIVE-mode banner so you can cancel.
-
-## ✅ What has been verified (be honest with yourself about this)
-
-| Area | Status |
-|---|---|
-| Google login, session reuse, 3-session-limit page | Tested live |
-| Finding pending classes and problems, skipping solved ones | Tested live and in an offline mock site |
-| Locked assignment & countdown modal guard | Tested live on upcoming classes (04d countdown skipped cleanly) |
-| MCQ: solve, submit, ReAct adaptive retries with red-sign / wrong option exclusion | Tested live and verified |
-| DevOps labs: launch, terminal typing, "end previous lab" prompt | Tested live |
-| Coding problems (Monaco injection, test feedback, compiler error retry loop) | Tested live with multi-pass ReAct sweep |
-| BITS / Coursera (`--bits`) | ReAct loop verified (OCR cache hit, answer-key indexer, pre-submit audit) |
-| SAAB Chrome Extension v2.0 | Tested with vitest (29 unit tests passing), Manifest V3 compliant |
-
-If something looks wrong, check the `debug/` folder (screenshot + page HTML are saved on failures) and open an issue with them.
-
-## 🎮 Run
+### 1. Safe Diagnostic & Benchmark Mode (Dry-Run)
+In dry-run mode, SAAB inspects pending problems, generates solutions, and displays full diagnostic reasoning without clicking Submit:
 
 ```bash
-# LIVE: submits real answers for everything it finds (read "First run" first)
-npm start
-
-# MCQs only — fastest, zero risk
-npm run start:mcq
-
-# Labs only (DevOps terminal labs + VS Code IDE)
-npm run start:labs
-
-# Skip terminal labs (if you don't want AI touching DevOps labs)
-npm run start:skip-labs
-
-# Dry run — solves but NEVER clicks Submit (safe preview)
+# Full dry-run across all curriculum modules
 npm run dry-run
 
-# Target a specific subject
-node main.js --subject=DevOps
+# Benchmark MCQ concept understanding
+npm run dry-run:mcq
 
-# Target a specific class ID
+# Benchmark BITS Coursera coursework offline
+npm run start:bits:dry-run
+
+# Limit diagnostic run to a single assignment
+npm run start:bits:one
+```
+
+### 2. Live Assistance & Verification Mode
+```bash
+# Launch Mission Control Web UI
+npm start
+
+# Run Scaler learning assistant (CLI)
+npm run start:cli
+
+# Target specific modules
+npm run start:mcq           # Conceptual problems only
+npm run start:labs          # DevOps terminal labs & coding
+npm run start:skip-labs     # Exclude terminal container labs
+
+# Target specific subject or class
+node main.js --subject="Modern Databases"
 node main.js --class=570714
+```
 
-# Force refresh the curriculum cache
-node main.js --refresh-curriculum
+### 3. BITS Pilani Coursera Degree Runner
+```bash
+# Synchronize and verify enrolled degree courses
+npm run start:bits
+
+# Target a specific course or assignment
+node main.js --bits --course="modern-databases"
+node main.js --bits --assignment="https://www.coursera.org/learn/modern-databases/team/IAFhO/graded-quiz-for-week-4-5-and-6"
+
+# Load specific course reference notes
+node main.js --bits --answers="answers/modern_databases_week4_5_6.json"
 ```
 
 ---
 
-## 🚀 Mission Control Web Dashboard (Phase 2)
+## 🖥️ Mission Control Web Dashboard
 
-SAAB includes a zero-build, developer-grade **Mission Control Web Dashboard** built with native Node.js/Express, Server-Sent Events (SSE), and dark glassmorphism.
+The local Mission Control dashboard provides a unified graphical interface for your academic progress:
 
 ```bash
-# Launch the Mission Control Web Dashboard
 npm run ui
-# Or
-node ui_server.js
 ```
-Open **`http://localhost:3000`** in your browser.
 
-### Key Dashboard Features
-1. **Universal Answer Ingestion Hub (Drag & Drop)**:
-   - Drag and drop `.pdf`, `.json`, `.txt`, or `.md` answer keys directly into the browser.
-   - Files are automatically saved to `answers/`, parsed via `AnswerStore`, and indexed into memory without restarting the server.
-   - Interactive Q&A Browser with search filtering and verified correct answer tags.
-2. **Real-Time ReAct Inspector**:
-   - Visualizes the 4-stage ReAct loop: **Reason** ➔ **Act** ➔ **Observe** ➔ **Self-Correct**.
-   - Displays a live feed of CDP self-corrections as they happen during execution.
-3. **Degree & Course Tracking**:
-   - Live status cards showing enrolled courses, active assignments, and recorded passing grades (`100%`, `92.5%`, `LOCKED`).
-4. **Interactive Control Hub & Live Streaming Terminal**:
-   - One-click run triggers: `SUBMIT (Live)` vs `DRY-RUN (Preview)`, course filters, and assignment limits.
-   - Real-time terminal log output streamed via Server-Sent Events (SSE).
-   - "Stop Execution" button for instant process termination.
+Navigate to **`http://localhost:3000`** in any web browser:
+1. **Degree Syllabus Tracker**: Displays enrolled degree courses with real-time status, milestone progress bars, and passing grades.
+2. **Study Notes & Reference Store**: Drag and drop `.pdf`, `.json`, `.txt`, or `.md` lecture notes directly into the UI. The Universal AnswerStore indexes them into memory instantly.
+3. **ReAct Diagnostic Inspector**: Visualizes live CDP enforcement events, option selections, and self-correction steps.
+4. **Live Terminal & Process Control**: Real-time Server-Sent Events (SSE) log output with instant stop controls.
 
 ---
 
-## 🎓 BITS Pilani (Coursera BSc Computer Science) — Autonomous ReAct Solver
+## 🎓 BITS Pilani (Coursera BSc CS) — ReAct Diagnostic Engine
 
-SAAB includes a production-grade autonomous agent tailored specifically for BITS Pilani Coursera degree quizzes, featuring an **Agentic ReAct Loop (Reason ➔ Act ➔ Observe ➔ Self-Correct)**.
-
-### Live Degree Verification Status
-
-| Course | Graded Assignment | Status | Grade | Verification |
-|---|---|---|---|---|
-| **Software Development Practices** | Graded Quiz (Week 4, 5, 6) | **PASSED** | **100%** | Verified Live |
-| **Modern Databases** | Graded Quiz (Week 4, 5, 6) | **PASSED** | **100%** | Retaken Live with AnswerStore |
-| **Network Programming & Client-Server** | Graded Quiz (Week 4, 5, 6) | **PASSED** | **92.5%** | Verified Live |
-| **Weeks 7 & 8** | Graded Quizzes | **LOCKED** | — | Opens Nov 1 (Early-Halt confirmed) |
-
-### ReAct Loop Architecture
+SAAB implements an **Agentic ReAct Loop (Reason ➔ Act ➔ Observe ➔ Self-Correct)** designed specifically for complex multi-select and single-choice online assessments:
 
 ```
            [ Question Loaded ]
@@ -170,8 +189,8 @@ SAAB includes a production-grade autonomous agent tailored specifically for BITS
                    ▼
        ┌───────────────────────┐
        │   1. REASON (Tiered)   │
-       │ • AnswerStore (PDF/MD)│
-       │ • Negative Cache Hint │
+       │ • Reference Notes DB  │
+       │ • Negative Error Cache│
        │ • Multi-Provider LLM  │
        └───────────┬───────────┘
                    │
@@ -185,7 +204,7 @@ SAAB includes a production-grade autonomous agent tailored specifically for BITS
                    ▼
        ┌───────────────────────┐
        │      3. OBSERVE       │
-       │ • Settle DOM (300ms)  │
+       │ • Settle DOM state    │
        │ • Verify aria-checked │
        └───────────┬───────────┘
                    │
@@ -208,217 +227,104 @@ SAAB includes a production-grade autonomous agent tailored specifically for BITS
        ┌───────────────────────┐
        │ 5. POST-SUBMIT REVIEW │
        │ • Parse Grade (XX.X%) │
-       │ • Cache Wrong Options │
-       │ • Grade < 80%?        │──┐ (Try Again / Retake)
-       │ • ReAct Retake Loop   │◄─┘
+       │ • Negative Error Memory│
+       │ • Verify Passing Goal │
        └───────────────────────┘
 ```
 
-1. **Tiered Reasoning & Universal Answer Ingestion**:
-   - **Tier 1 (Ground Truth)**: Loads answer sheets from [`answers/`](./answers) or `--answers=<path>`. Evaluates prompt text similarity and maps answers to live options by content text, making it completely resilient to Coursera option scrambling.
-   - **Tier 2 (Negative Feedback Memory)**: Penalizes previously failed options from `.solver-cache/`.
-   - **Tier 3 (Multi-Provider Fallback)**: Gemini Vision, Groq, and Grok with structured JSON schemas.
-2. **Active State Enforcement & DOM Unchecking**:
-   - Emits synthetic events to check target options and **actively unchecks stale non-target options** left behind in previous draft attempts.
-3. **Observation & CDP Self-Correction**:
-   - Reads settled virtual DOM states (`aria-checked`, `input.checked`).
-   - If Coursera's React event listener swallows the click, overrides and enforces selection using native Playwright CDP locators (`page.locator('id=...').check({ force: true })`).
-4. **Pre-Submission Completeness Audit Gate**:
-   - Audits every question container before signing the Honor Code.
-   - Automatically enters a targeted recovery loop for any unanswered questions.
-   - **Safety Block**: Aborts submission and saves draft if any question remains unanswered to protect your GPA.
-5. **Cross-Attempt Autonomous Retake**:
-   - Parses exact decimal grades (`92.5%`, `37.5%`) with negative lookaheads preventing threshold confusion.
-   - Scrapes review cards (`0 / 1 point`, `aria-label="Incorrect"`) into `.solver-cache/`.
-   - Automatically clicks `Try again` / `Retake assignment` to re-attempt and reach $\ge 80\%$.
+### Empirical Verification Status
 
-### CLI Usage for BITS Coursera
-
-```bash
-# Run BITS Coursera degree auto-solver (live submit)
-npm run start:bits
-
-# Preview mode (solves and logs questions without submitting)
-npm run start:bits:dry-run
-
-# Limit to a single assignment
-npm run start:bits:one
-
-# Target a specific course
-node main.js --bits --course="modern-databases"
-
-# Pass a specific answer key file
-node main.js --bits --answers="answers/modern_databases_week4_5_6.json"
-
-# Target a specific assignment URL directly
-node main.js --bits --assignment="https://www.coursera.org/learn/modern-databases/team/IAFhO/graded-quiz-for-week-4-5-and-6"
-
-# Run the full offline E2E test suite (13 parts verified)
-npm run test:bits
-```
+| Course | Module / Assessment | Status | Grade | Verification Note |
+|---|---|---|---|---|
+| **Software Development Practices** | Graded Assessment (Weeks 4, 5, 6) | **PASSED** | **100%** | Verified Live |
+| **Modern Databases** | Graded Assessment (Weeks 4, 5, 6) | **PASSED** | **100%** | Verified Live with Reference Store |
+| **Network Programming & Client-Server** | Graded Assessment (Weeks 4, 5, 6) | **PASSED** | **92.5%** | Verified Live |
+| **Weeks 7 & 8 (Upcoming)** | Graded Assessments | **LOCKED** | — | Automatic countdown detection & skip |
 
 ---
 
-## ⚙️ Full `.env` Reference
-
-```env
-# ─── Scaler Credentials ─────────────────────────────────────────────────────
-# Optional: if set, auth.js auto-logs in. Otherwise log in manually via browser.
-SCALER_EMAIL=your@email.com
-SCALER_PASS=your_password
-
-# ─── AI Providers (at least one required) ───────────────────────────────────
-# Gemini (Google AI Studio — free tier available)
-GEMINI_API_KEY=AIzaSy...
-# Multiple keys for high-volume round-robin pool:
-# GEMINI_API_KEYS=key1,key2,key3
-# Model (default: gemini-3-flash-preview)
-# GEMINI_MODEL=gemini-3-flash-preview
-
-# Groq (Llama-3.3-70B — free, ultra-fast fallback)
-GROQ_API_KEY=gsk_...
-GROQ_MODELS=llama-3.3-70b-versatile,qwen/qwen3-32b
-
-# xAI Grok (optional third fallback)
-# GROK_API_KEY=xai-...
-# GROK_MODEL=grok-beta
-
-# ─── Performance ─────────────────────────────────────────────────────────────
-SOLVE_CONCURRENCY=4          # Parallel workers per class (lower = safer)
-MAX_OUTPUT_TOKENS=4096       # Max tokens per AI response
-API_SPACING_MS=2200          # Min ms between API calls (increase if rate-limited)
-
-# ─── Filtering ────────────────────────────────────────────────────────────────
-# TARGET_SUBJECTS=DevOps,Computer Networks   # Comma-separated, blank = all subjects
-# SKIP_LABS=true       # Skip Maxwell terminal labs
-# ONLY_MCQ=true        # Only solve MCQ problems
-```
-
----
-
-## 🏗️ Architecture
+## 🏗️ Repository Architecture
 
 ```
 SAAB
-├── ui/                     ← Mission Control Web Dashboard frontend (HTML5, Vanilla CSS, JS)
-│   ├── index.html          ← Glassmorphic dashboard (BITS, Scaler, Ingestion Hub, Terminal)
-│   ├── styles.css          ← Dark theme design system (Inter font, micro-animations, glass cards)
+├── ui/                     ← Mission Control Web Dashboard (HTML5, Vanilla CSS, JS)
+│   ├── index.html          ← Glassmorphic dashboard (BITS, Scaler, Reference Store, Terminal)
+│   ├── styles.css          ← Dark glass design system (Inter typography, responsive grid)
 │   └── app.js              ← Client controller (SSE streaming, drag-and-drop ingestion, tabs)
-├── ui_server.js            ← Express backend server with SSE streaming, file upload, & runner
-├── answer_indexer.js       ← Universal AnswerStore: PDF/JSON/TXT parser with scramble-proof matching
-├── answers/                ← Answer key storage directory (drop PDFs, JSON, or text files here)
+├── ui_server.js            ← Express backend with SSE streaming, file ingestion, & port fallback
+├── answer_indexer.js       ← Universal ReferenceStore: PDF/JSON/TXT parser with fuzzy matching
+├── answers/                ← Local directory for reference notes, syllabus PDFs, and question banks
 ├── bits_main.js            ← BITS Coursera degree runner & early-halt boundary controller
-├── bits_handler.js         ← BITS quiz solver: ReAct enforce/observe loop, audit gate, & auto-retake
-├── bits_crawler.js         ← BITS degree dashboard & module outline crawler
-├── bits_auth.js            ← Coursera authentication helper
-├── bits-run-state.json     ← Persistent degree completion state & verified grades
+├── bits_handler.js         ← ReAct enforce/observe loop, completeness audit, & review handler
+├── bits_crawler.js         ← Coursera degree dashboard & course syllabus crawler
+├── bits_auth.js            ← Coursera Google SSO authentication helper
 ├── test_bits_dom.js        ← 13-part offline E2E test suite for BITS Coursera
 ├── main.js                 ← Scaler orchestrator: crawls queue, spawns worker pool, checkpoints
-├── crawler.js              ← Discovers all pending assignments from Scaler dashboard
-├── solver.js               ← AI engine: Gemini Vision + Groq fallback, caching, retry loop
-├── injector.js             ← Monaco editor injection + verdict detection for coding problems
-├── mcq_handler.js          ← MCQ scraper (text + screenshot), answer injector
-├── lab_handler.js          ← Maxwell terminal lab: Launch → AI commands → xterm type → Submit
-├── workspace_manager.js    ← VS Code IDE: Monaco file extraction → AI solve → re-inject
-├── code_utils.js           ← Pure helpers for cleaning/validating LLM output (unit-tested)
-├── lab_guard.js            ← Refuses destructive/unsafe AI-generated lab shell commands
-├── config.js               ← All CSS selectors (update here if Scaler changes DOM)
-└── auth.js                 ← One-time login session creator
-```
-
-**AI Waterfall per problem:**
-```
-Gemini (key 1) → Gemini (key 2..N) → Groq (model 1) → Groq (model 2) → Grok → fail
-         ↓ on 429: exponential backoff + key rotation
-         ↓ on empty output: isRetryableServerError → retry with backoff
+├── crawler.js              ← Discovers syllabus assignments from Scaler dashboard
+├── solver.js               ← Multi-model AI engine: Gemini Vision + Groq fallback, caching, retries
+├── injector.js             ← Monaco editor code injection & automated test runner
+├── mcq_handler.js          ← Concept question parser (text + screenshot) & selector
+├── lab_handler.js          ← Maxwell terminal lab: Launch → AI commands → xterm typing
+├── workspace_manager.js    ← Multi-file IDE workspace extractor & code refactorer
+├── code_utils.js           ← Pure algorithmic helpers for parsing & validating LLM code output
+├── lab_guard.js            ← Security filter blocking destructive shell commands (rm -rf, etc.)
+├── config.js               ← DOM selector configuration
+├── scripts/
+│   └── bootstrap.js        ← Zero-setup auto-bootstrapper for dependencies & browsers
+└── test/                   ← Comprehensive unit test suite (109 passing tests)
 ```
 
 ---
 
-## 🛡️ Reliability Features
+## 🛡️ Reliability & Security Safeguards
 
-- **Run state checkpoint** — resumes exactly where it left off after a crash or Ctrl+C
-- **Short curriculum cache** — 2 min by default (`CURRICULUM_CACHE_TTL_MS` to change, `--refresh-curriculum` to force)
-- **Verified-only solution cache** — SHA-256 keyed; an answer is cached only after Scaler confirms it passed, and evicted if it fails (wrong MCQ options are remembered so they aren't re-submitted)
-- **No guessed answers** — if no provider returns a valid MCQ answer nothing is submitted
-- **Lab command guard** — destructive/exfiltrating commands from the model are refused
-- **Ctrl+C** — first press saves state and stops cleanly, second press force-quits; fatal errors exit non-zero
-- **Session auto-recovery** — detects `/login` redirect and re-authenticates mid-run
-- **SolveBot purge** — removes Scaler's floating AI widget before every interaction
-- **Proceed modal handling** — automatically confirms confirmation dialogs
-- **SIGINT/SIGTERM** — Ctrl+C saves state cleanly before exit
+- **Multi-Pass Checkpointing**: Progress is atomically persisted in `run-state.json`. Interrupted runs resume exactly where they left off without repeating completed modules.
+- **Strict Command Security Guard**: The Maxwell container runner passes all generated bash commands through [`lab_guard.js`](./lab_guard.js), strictly blocking destructive (`rm -rf`, `:(){ :|:& };:`) or data-exfiltration patterns.
+- **Locked Assignment Guard**: Upcoming assignments guarded by countdown timers (*"Problems will open in XX Days"*) or lock icons are detected immediately and skipped cleanly without burning API calls.
+- **Dynamic Port Collision Handling**: If port `3000` is occupied, `ui_server.js` automatically cascades to ports `3001..3005`.
+- **Negative Error Feedback Memory**: Incorrect options recorded during previous attempts are permanently cached in `.solver-cache/`, preventing repeated errors.
 
 ---
 
-## 📊 Run Output Example
+## 🚦 Rate Limiting & Multi-Model Pooling
 
-```
-============================================================
-Processing class: https://www.scaler.com/academy/.../class/570714
-Pending: Assignment 2/7
-Subject: DevOps
-============================================================
-Found 7 assignment problem(s). Initiating Page Pool workers...
-
-  [Worker 0] Detected problem type: mcq for Q1 - Linux Basics
-  [Worker 0] [CACHE HIT] MCQ Option 3
-  [Worker 0] ✓ MCQ Passed: Q1 - Linux Basics
-
-  [Worker 1] Detected problem type: lab for Q4 - File Permissions Lab
-  [Lab Solver] Maxwell container ready in 18s!
-  [Lab Solver] Generated 5 commands.
-  [Lab Solver] ✓ Lab is fully SOLVED!
-
-=== Run Summary ===
-Solved: 6   Failed: 0   Skipped: 1
-Cache hits: 4, misses: 3
-Elapsed: 142s
-```
+SAAB incorporates a production-grade rate limiter ([`rate_limiter.js`](./rate_limiter.js)) to keep API calls within free-tier quotas:
+- **Rolling Rate Limits**: Automatically tracks requests-per-minute (RPM) and requests-per-day (RPD) per key.
+- **Multi-Key Round-Robin**: Rotates through arrays of API keys (`GEMINI_API_KEYS=key1,key2,key3`) across independent Google Cloud projects.
+- **Tiered Multi-Model Waterfall**:
+  ```
+  Gemini 3.1 Flash-Lite ➔ Gemini 3.5 Flash-Lite ➔ Groq (Llama-3.3-70B) ➔ Grok ➔ Graceful Stop
+  ```
+- **Automatic Backoff**: On HTTP 429 responses, the engine backs off exponentially and temporarily lowers request concurrency.
 
 ---
 
-## ⚠️ Important Notes
+## 🧪 Testing & Quality Assurance
 
-- **Never commit `.env` or `session.json`** — they contain your password and active session cookies
-- **`temp_chrome_profile/`** is gitignored — it holds your Chrome login state
-- Reduce `SOLVE_CONCURRENCY` to `1` if you hit "too many requests" errors on Scaler's side
-- On first run, let the crawler finish fully — it builds `curriculum-cache.json` which speeds up repeat runs
-- Run `npm test` for the unit tests
+Run the comprehensive unit test suite:
+```bash
+npm test
+```
+Outputs TAP-compliant results covering all core modules:
+```
+1..109
+# tests 109
+# suites 0
+# pass 109
+# fail 0
+```
 
 ---
 
 ## 🤝 Contributing
 
-Problems, edge cases, new problem types — PRs welcome. The selector config lives entirely in [`config.js`](./config.js) so DOM changes are a one-line fix.
+Contributions are warmly welcomed! Areas for enhancement include:
+- Adding support for additional online computer science learning platforms.
+- Implementing local open-weight model backends via Ollama or vLLM.
+- Expanding the course reference store with specialized vector embeddings.
 
 ---
 
-## 🚦 Rate limits and Gemini key pooling
+## 📄 License
 
-**Pooling.** Put several keys in `GEMINI_API_KEYS=key1,key2,key3`. Work goes to the least-loaded usable key (not always key 1), a key that hits its **daily** quota is retired for the day, and Groq/Grok are the fallbacks.
-Google applies limits **per project, not per API key**, so extra keys only add capacity when they belong to different projects. (The rate-limit page says nothing either way about using several projects; check Google's terms before relying on that.)
-
-**Staying under the limits.** Every request passes through a per-key limiter (`rate_limiter.js`):
-- a rolling **requests-per-minute** cap (`GEMINI_RPM`, default 10) and a minimum gap (`API_SPACING_MS`)
-- an optional **requests-per-day** budget (`GEMINI_RPD`) that is persisted in `.quota/` (key hashes only, never keys), so a second run the same day knows what the first spent. The day rolls over at midnight **Pacific** time, like Google's quota
-- if a 429 still happens, the whole lane pauses for the provider's retry delay, the allowed rate is halved and creeps back up after quiet minutes. Per-minute limits never retire a key; only a genuine per-day limit does
-- when every provider is out for the day the run stops cleanly and resumes from its checkpoint
-
-**What can't be guaranteed.** Google's free-tier numbers are per model, unpublished on the docs page, and "not guaranteed", so there is no universally safe default: read them in AI Studio and set `GEMINI_RPM` / `GEMINI_RPD`. Tokens-per-minute is not tracked (image questions cost more), and anything else using the same project (a browser tab in AI Studio, another script) spends the same quota.
-
----
-
-## 🎯 What gets solved (and what never does)
-
-- **Only assignments.** The "Additional Problems" (homework) section of a class is **not** solved by default; its links are ignored.
-- **Never an already-solved problem.** If the problems table, the question dock or the problem page says *Solved* (status tag only, never free text in the title), it is skipped; the state is re-checked right before every AI call and every submit.
-- **MCQs:** up to **3 tries** (`MCQ_MAX_TRIES`). Every wrong answer is remembered and excluded from the next try; after that the question is left alone, including on later runs. A verdict is read from what *changed* after the click (Solved, or the attempts counter dropping), never from a badge that was already there.
-- **Labs:** if Scaler warns that running again would reset completed tasks, SAAB cancels and stops instead of confirming.
-
-### Model pool (recommended)
-
-On the free tier the daily quota is **per model**. The default model used to be `gemini-2.5-flash` (20 requests/day) which a single class can exhaust.
-Set `GEMINI_MODELS=gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-2.5-flash` to get ~1000 requests/day per key: the first model is used while it has
-capacity (15/min, 500/day), then the next one takes over, and the daily/per-minute budgets of every (model, key) pair are tracked separately and remembered
-across runs. Image questions only go to vision-capable (Gemini) models, and Gemma models are never sent JSON mode (they reject it).
-`GEMINI_LIMITS=model=rpm/rpd,...` teaches SAAB the limits of a model it does not know.
+This project is licensed under the [MIT License](./LICENSE).

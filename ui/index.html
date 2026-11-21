@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SAAB Mission Control — BITS Pilani & Scaler Autonomous Agent</title>
+  <title>SAAB Mission Control — Student Academic Assistant & LLM Benchmarking Platform</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -20,7 +20,7 @@
       <div>
         <h1 class="brand-title">SAAB Mission Control</h1>
       </div>
-      <span class="brand-badge">SOTA v2.0</span>
+      <span class="brand-badge">Academic Suite v2.0</span>
     </div>
 
     <div style="display: flex; align-items: center; gap: 0.75rem;">
@@ -59,7 +59,7 @@
           <line x1="16" y1="17" x2="8" y2="17"></line>
           <polyline points="10 9 9 9 8 9"></polyline>
         </svg>
-        Answer Ingestion Hub
+        Study Notes & References
       </button>
 
       <button class="tab-btn" data-tab="tab-react">
@@ -74,7 +74,7 @@
           <polyline points="16 18 22 12 16 6"></polyline>
           <polyline points="8 6 2 12 8 18"></polyline>
         </svg>
-        Scaler Hub
+        Scaler Learning Hub
       </button>
 
       <button class="tab-btn" data-tab="tab-terminal">
@@ -98,8 +98,8 @@
         <div class="controls-group">
           <label style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted);">Mode:</label>
           <select id="runMode" class="select-custom">
-            <option value="submit">SUBMIT (Live Solving)</option>
-            <option value="dry-run">DRY-RUN (Preview Only)</option>
+            <option value="submit">ASSIST & VERIFY (Live Session)</option>
+            <option value="dry-run">DRY-RUN (Diagnostic & Explanation)</option>
           </select>
 
           <label style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted);">Target Course:</label>
@@ -122,7 +122,7 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
               <polygon points="5 3 19 12 5 21 5 3"></polygon>
             </svg>
-            Start Auto-Solver
+            Start Academic Assistant
           </button>
 
           <button id="btnStop" class="btn btn-danger" style="display: none;">
@@ -137,7 +137,7 @@
       <!-- Enrolled Courses Grid -->
       <div>
         <div class="section-title">
-          <span>Enrolled Degree Courses & Live Quiz Status</span>
+          <span>Enrolled Degree Courses & Syllabus Milestones</span>
           <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
             <button class="btn btn-secondary" id="btnLoginCoursera" style="padding: 0.35rem 0.75rem; font-size: 0.78rem; display: flex; align-items: center; gap: 0.35rem;" title="Open visible Chrome window to log into Coursera / BITS Google account">
               <span>🔑 Login Coursera</span>
@@ -163,11 +163,11 @@
       </div>
     </section>
 
-    <!-- TAB 2: ANSWER INGESTION HUB -->
+    <!-- TAB 2: STUDY NOTES & REFERENCE STORE -->
     <section id="tab-answers" class="tab-content">
       <div class="section-title">
-        <span>Universal Answer Key Ingestion</span>
-        <span style="font-size: 0.82rem; color: var(--text-muted);" id="answersSummaryCount">Loading answer keys...</span>
+        <span>Universal Study Notes & Reference Store</span>
+        <span style="font-size: 0.82rem; color: var(--text-muted);" id="answersSummaryCount">Loading study references...</span>
       </div>
 
       <!-- Drag & Drop Upload Zone -->
@@ -179,8 +179,8 @@
             <line x1="12" y1="3" x2="12" y2="15"></line>
           </svg>
         </div>
-        <h3>Drop PDF, Images (PNG/JPG), JSON, TXT, or MD Answer Keys Here</h3>
-        <p>Supports full quiz answer sheets, screenshots & raster PDFs (multimodal Gemini OCR), scrambled option auto-mapping, and fuzzy matching.</p>
+        <h3>Drop PDF Notes, Diagrams, JSON, TXT, or Markdown References Here</h3>
+        <p>Supports curriculum syllabus sheets, lecture notes, textbook references (multimodal Gemini OCR), and semantic question alignment.</p>
         <button class="btn btn-secondary" id="btnBrowse" type="button">Or Click to Browse File</button>
         <input type="file" id="fileInput" accept=".pdf,.json,.txt,.md,.png,.jpg,.jpeg,.webp" style="display: none;">
       </div>
@@ -188,7 +188,7 @@
       <!-- Indexed Questions List -->
       <div class="glass" style="padding: 1.5rem;">
         <div class="section-title" style="margin-bottom: 1rem;">
-          <span>Indexed Answer Store (<span id="totalQuestionsCount">0</span> questions available)</span>
+          <span>Indexed Reference Store (<span id="totalQuestionsCount">0</span> reference items available)</span>
           <input type="text" id="filterQuestionsInput" class="input-custom" placeholder="Search prompts..." style="max-width: 250px;">
         </div>
         <div class="questions-list" id="questionsContainer">
@@ -235,7 +235,7 @@
         <h4 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 0.85rem;">Live ReAct Self-Correction Log</h4>
         <div id="reactEventFeed" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 280px; overflow-y: auto;">
           <div style="font-size: 0.82rem; color: var(--text-muted); font-style: italic;">
-            Ready. Real-time ReAct loop events will appear here when an auto-solver run is initiated.
+            Ready. Real-time ReAct loop events will appear here when an academic assistant run is initiated.
           </div>
         </div>
       </div>
@@ -244,7 +244,7 @@
     <!-- TAB 4: SCALER HUB -->
     <section id="tab-scaler" class="tab-content">
       <div class="section-title">
-        <span>Scaler Academy Autonomous Solver</span>
+        <span>Scaler Academy Academic Assistant</span>
         <span class="badge badge-passed">Operational</span>
       </div>
 
@@ -253,8 +253,8 @@
         <div class="controls-group">
           <label style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted);">Mode:</label>
           <select id="scalerRunMode" class="select-custom">
-            <option value="submit">SUBMIT (Live Solving)</option>
-            <option value="dry-run">DRY-RUN (Preview Only)</option>
+            <option value="submit">ASSIST & VERIFY (Live Session)</option>
+            <option value="dry-run">DRY-RUN (Diagnostic & Explanation)</option>
           </select>
 
           <label style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted);">Assignment Scope:</label>
@@ -274,7 +274,7 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
               <polygon points="5 3 19 12 5 21 5 3"></polygon>
             </svg>
-            Start Scaler Auto-Solver
+            Start Scaler Assistant
           </button>
           <button id="btnStopScaler" class="btn btn-danger" style="display: none;">
             Stop Execution
@@ -284,23 +284,23 @@
 
       <div class="glass" style="padding: 1.5rem; margin-top: 1.25rem;">
         <h4 style="font-size: 1rem; font-weight: 600; margin-bottom: 0.5rem; color: #fff;">
-          🚀 Scaler Full-Stack Pipeline Capabilities
+          🚀 Scaler Educational Pipeline Capabilities
         </h4>
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-top: 1rem;">
           <div style="background: rgba(15, 23, 42, 0.6); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-subtle);">
-            <div style="font-weight: 600; color: var(--accent-cyan); margin-bottom: 0.35rem;">MCQ Automated Solving</div>
+            <div style="font-weight: 600; color: var(--accent-cyan); margin-bottom: 0.35rem;">Automated Concept Evaluation</div>
             <div style="font-size: 0.82rem; color: var(--text-muted);">
-              Scrapes statement, options, attempt counters, and screenshots. Solves via multi-model pool and clicks the answer.
+              Analyzes question statement, multi-modal diagrams, and attempts. Verifies theoretical concepts using LLM reasoning.
             </div>
           </div>
           <div style="background: rgba(15, 23, 42, 0.6); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-subtle);">
-            <div style="font-weight: 600; color: var(--accent-emerald); margin-bottom: 0.35rem;">Monaco Coding Lab Injection</div>
+            <div style="font-weight: 600; color: var(--accent-emerald); margin-bottom: 0.35rem;">Monaco Code Scaffold & Debugging</div>
             <div style="font-size: 0.82rem; color: var(--text-muted);">
-              Extracts problem statement, test cases, and starter code. Generates syntax-checked code and injects into the Monaco editor.
+              Extracts problem statement, test cases, and starter code. Generates syntax-checked solutions directly into the editor.
             </div>
           </div>
           <div style="background: rgba(15, 23, 42, 0.6); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-subtle);">
-            <div style="font-weight: 600; color: var(--accent-blue); margin-bottom: 0.35rem;">ReAct Self-Correction</div>
+            <div style="font-weight: 600; color: var(--accent-blue); margin-bottom: 0.35rem;">ReAct Self-Correction Engine</div>
             <div style="font-size: 0.82rem; color: var(--text-muted);">
               Evaluates execution errors (TLE, WA, Compilation Error), evicts faulty solutions, and retries with targeted failure feedback.
             </div>

@@ -1,6 +1,6 @@
-# SAAB Mission Control — PowerShell Launcher
+﻿# SAAB Mission Control — PowerShell Launcher
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  SAAB — Autonomous Academic Solver & Mission Control" -ForegroundColor Cyan
+Write-Host "  SAAB — Student Academic Assistant & Benchmarking Suite" -ForegroundColor Cyan
 Write-Host "============================================================`n"
 
 # 1. Check Node

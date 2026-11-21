@@ -24,7 +24,7 @@ function checkAndInstallDeps() {
 
   if (missing.length > 0 || !fs.existsSync(path.join(rootDir, 'node_modules'))) {
     console.log('\n============================================================');
-    console.log('🚀 SAAB Mission Control — Zero-Setup Auto-Bootstrapper');
+    console.log('🚀 SAAB Mission Control — Student Academic Assistant & Auto-Bootstrapper');
     console.log(`Missing dependencies detected (${missing.join(', ')}).`);
     console.log('Running npm install automatically...');
     console.log('============================================================\n');

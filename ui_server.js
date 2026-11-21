@@ -547,7 +547,7 @@ app.post('/api/run', (req, res) => {
     activeProcess = null;
   });
 
-  res.json({ success: true, message: 'Auto-solver initiated.', args });
+  res.json({ success: true, message: 'Academic assistant task initiated.', args });
 });
 
 // 5. Terminate running process

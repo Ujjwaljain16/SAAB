@@ -4,7 +4,7 @@ setlocal enabledelayedexpansion
 title SAAB Mission Control — Turnkey Launcher
 
 echo ============================================================
-echo   SAAB — Autonomous Academic Solver & Mission Control
+echo   SAAB — Student Academic Assistant & Benchmarking Suite
 echo ============================================================
 echo.
 

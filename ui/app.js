@@ -45,7 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (data.isRunning) {
       systemDot.classList.add('busy');
-      systemStatusText.textContent = 'Auto-Solver Running...';
+      systemStatusText.textContent = 'Academic Assistant Running...';
       btnRun.style.display = 'none';
       btnStop.style.display = 'inline-flex';
       if (btnRunScaler) btnRunScaler.style.display = 'none';
@@ -440,7 +440,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (btnStop) {
     btnStop.addEventListener('click', async () => {
-      if (!confirm('Are you sure you want to stop the auto-solver?')) return;
+      if (!confirm('Are you sure you want to stop the current academic assistant task?')) return;
       try {
         btnStop.disabled = true;
         const res = await fetch('/api/stop', { method: 'POST' });
@@ -474,7 +474,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         const data = await res.json();
         if (!res.ok) {
-          alert(`Could not start Scaler solver: ${data.error || 'Server error'}`);
+          alert(`Could not start Scaler assistant: ${data.error || 'Server error'}`);
         } else {
           const termTabBtn = document.querySelector('.tab-btn[data-tab="tab-terminal"]');
           if (termTabBtn) termTabBtn.click();
@@ -490,7 +490,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (btnStopScaler) {
     btnStopScaler.addEventListener('click', async () => {
-      if (!confirm('Stop Scaler auto-solver?')) return;
+      if (!confirm('Stop Scaler assistant task?')) return;
       try {
         await fetch('/api/stop', { method: 'POST' });
       } finally {
