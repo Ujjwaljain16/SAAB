@@ -1,4 +1,4 @@
-﻿# SAAB Mission Control — PowerShell Launcher
+# SAAB Mission Control — PowerShell Launcher
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  SAAB — Student Academic Assistant & Benchmarking Suite" -ForegroundColor Cyan
 Write-Host "============================================================`n"
