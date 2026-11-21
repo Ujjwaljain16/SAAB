@@ -28,6 +28,7 @@ process.on('SIGTERM', () => {
 const DELAY = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function runBits(options = {}) {
+  const runId = `bits_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const DRY_RUN = options.dryRun ?? (!process.argv.includes('--submit') && !process.argv.includes('--live'));
   const COURSE_ARG = options.course ?? (process.argv.find((a) => a.startsWith('--course='))?.split('=')[1] || '');
   const ASSIGNMENT_ARG = options.assignment ?? (process.argv.find((a) => a.startsWith('--assignment='))?.split('=')[1] || '');
@@ -112,7 +113,16 @@ export async function runBits(options = {}) {
   const page = ctx.pages()[0] || (await ctx.newPage());
   await page.bringToFront().catch(() => {});
   const runLog = [];
+  const rawPush = runLog.push.bind(runLog);
+  runLog.push = (entry) => {
+    return rawPush({
+      runId,
+      timestamp: new Date().toISOString(),
+      ...entry
+    });
+  };
   const metrics = {
+    runId,
     startedAt: Date.now(),
     coursesSeen: 0,
     assignmentsSeen: 0,
@@ -272,6 +282,7 @@ export async function runBits(options = {}) {
     console.log(`\n============================================================`);
     console.log(`🎓 BITS Coursera Run Summary`);
     console.log(`============================================================`);
+    console.log(`Run ID:             ${metrics.runId}`);
     console.log(`Courses seen:       ${metrics.coursesSeen}`);
     console.log(`Assignments seen:   ${metrics.assignmentsSeen}`);
     console.log(`Solved / Passed:    ${metrics.solved}`);
@@ -284,8 +295,18 @@ export async function runBits(options = {}) {
     console.log(`============================================================\n`);
 
     try {
+      const runRecord = {
+        runId: metrics.runId,
+        startedAt: new Date(metrics.startedAt).toISOString(),
+        finishedAt: new Date().toISOString(),
+        mode: DRY_RUN ? 'dry-run' : 'submit',
+        metrics,
+        entries: runLog
+      };
       fs.writeFileSync('bits-run-log.json', JSON.stringify(runLog, null, 2));
-      console.log('Run log saved to bits-run-log.json');
+      fs.mkdirSync('runs', { recursive: true });
+      fs.writeFileSync(path.join('runs', `${metrics.runId}.json`), JSON.stringify(runRecord, null, 2));
+      console.log(`Run log saved to bits-run-log.json and runs/${metrics.runId}.json`);
     } catch {}
 
     await ctx.close().catch(() => {});

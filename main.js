@@ -25,6 +25,7 @@ import { normalizeScalerUrl, canonicalProblemUrl } from './scaler_url.js';
 import { loginToScaler } from './scaler_login.js';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 let globalHaltRun = false;
 let globalHaltReason = '';
@@ -122,8 +123,9 @@ class AsyncMutex {
 
 const workspaceMutex = new AsyncMutex();
 
-function createRunMetrics() {
+function createRunMetrics(runId = `run_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`) {
   return {
+    runId,
     startedAt: Date.now(),
     classesSeen: 0,
     classesSkipped: 0,
@@ -144,6 +146,7 @@ function printRunSummary(metrics, log) {
   const totalDone = log.filter((entry) => entry.result === 'pass' || entry.result === 'dry-run').length;
 
   console.log('\n=== Run Summary ===');
+  console.log(`Run ID: ${metrics.runId}`);
   console.log(`Classes seen: ${metrics.classesSeen}`);
   console.log(`Classes skipped from checkpoint: ${metrics.classesSkipped}`);
   console.log(`Problems read: ${metrics.problemsRead}`);
@@ -290,6 +293,14 @@ async function run() {
   }
 
   const log = [];
+  const rawPush = log.push.bind(log);
+  log.push = (entry) => {
+    return rawPush({
+      runId: metrics.runId,
+      timestamp: new Date().toISOString(),
+      ...entry
+    });
+  };
 
   try {
     let mainPage = ctx.pages()[0] || await ctx.newPage();
@@ -1086,11 +1097,19 @@ async function run() {
   }
   } finally {
     try {
+      const runRecord = {
+        runId: metrics.runId,
+        startedAt: new Date(metrics.startedAt).toISOString(),
+        finishedAt: new Date().toISOString(),
+        mode: DRY_RUN ? 'dry-run' : 'submit',
+        metrics,
+        entries: log
+      };
       const logJson = JSON.stringify(log, null, 2);
       fs.writeFileSync(dataPath('run-log.json'), logJson);
-      // Keep a per-run history so earlier runs aren't lost when the next one overwrites run-log.json.
+      // Keep a per-run history indexed by runId so runs can be correlated and audited
       fs.mkdirSync(dataPath('runs'), { recursive: true });
-      fs.writeFileSync(dataPath('runs', `run-${new Date(metrics.startedAt).toISOString().replace(/[:.]/g, '-')}.json`), logJson);
+      fs.writeFileSync(dataPath('runs', `${metrics.runId}.json`), JSON.stringify(runRecord, null, 2));
     } catch {}
 
     if (globalHaltRun) {
