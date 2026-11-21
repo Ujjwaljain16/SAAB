@@ -35,6 +35,9 @@ export async function snapshotPage(page, label, note = '') {
     const prefix = path.join(SNAPSHOT_DIR, `${stamp}-${safeLabel(label)}`);
 
     await page.screenshot({ path: `${prefix}.png`, fullPage: false, timeout: 5000 }).catch(() => {});
+    try {
+      fs.copyFileSync(`${prefix}.png`, path.join(SNAPSHOT_DIR, 'latest.png'));
+    } catch {}
     const html = await page.content().catch(() => '');
     fs.writeFileSync(`${prefix}.html`, html);
     fs.writeFileSync(`${prefix}.txt`, `${page.url()}\n${note}\n`);

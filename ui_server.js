@@ -5,6 +5,7 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { answerStore } from './answer_indexer.js';
+import { getProviderTelemetry } from './solver.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -579,6 +580,11 @@ app.get('/api/stream', (req, res) => {
   // Send initial ping
   res.write(`event: connected\ndata: ${JSON.stringify({ time: new Date().toISOString() })}\n\n`);
 
+  // Send initial telemetry snapshot
+  try {
+    res.write(`event: telemetry\ndata: ${JSON.stringify(getProviderTelemetry())}\n\n`);
+  } catch {}
+
   // Replay buffered logs so refreshing the browser tab mid-flight restores complete terminal history!
   for (const item of logBuffer) {
     res.write(`event: log\ndata: ${JSON.stringify(item)}\n\n`);
@@ -593,6 +599,120 @@ app.get('/api/stream', (req, res) => {
     sseClients.delete(res);
   });
 });
+
+// 7. System & AI Telemetry
+app.get('/api/telemetry', (req, res) => {
+  try {
+    res.json({ ok: true, telemetry: getProviderTelemetry() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// 8. Run History Listing
+app.get('/api/runs', (req, res) => {
+  try {
+    const runsDir = path.join(__dirname, 'runs');
+    if (!fs.existsSync(runsDir)) {
+      return res.json({ ok: true, runs: [] });
+    }
+    const files = fs.readdirSync(runsDir).filter((f) => f.endsWith('.json'));
+    const runs = [];
+    for (const f of files) {
+      try {
+        const content = fs.readFileSync(path.join(runsDir, f), 'utf8');
+        const parsed = JSON.parse(content);
+        runs.push({
+          runId: parsed.runId || f.replace('.json', ''),
+          startedAt: parsed.startedAt || null,
+          finishedAt: parsed.finishedAt || null,
+          mode: parsed.mode || 'dry-run',
+          metrics: parsed.metrics || {},
+          entryCount: Array.isArray(parsed.entries) ? parsed.entries.length : 0
+        });
+      } catch {}
+    }
+    runs.sort((a, b) => new Date(b.startedAt || 0) - new Date(a.startedAt || 0));
+    res.json({ ok: true, runs });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// 9. Run Record Detail & Replay Inspector
+app.get('/api/runs/:runId', (req, res) => {
+  const { runId } = req.params;
+  if (!/^[a-zA-Z0-9_-]+$/.test(runId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid runId format' });
+  }
+  const filePath = path.join(__dirname, 'runs', `${runId}.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ ok: false, error: 'Run record not found' });
+  }
+  try {
+    const record = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    res.json({ ok: true, run: record });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// 10. Live Viewport Screenshot Stream
+app.get('/api/screenshot/latest', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
+  const debugDir = path.join(__dirname, 'debug');
+  const latestPath = path.join(debugDir, 'latest.png');
+
+  if (fs.existsSync(latestPath)) {
+    res.setHeader('Content-Type', 'image/png');
+    return fs.createReadStream(latestPath).pipe(res);
+  }
+
+  if (fs.existsSync(debugDir)) {
+    const pngs = fs.readdirSync(debugDir).filter((f) => f.endsWith('.png')).map((f) => ({
+      name: f,
+      time: fs.statSync(path.join(debugDir, f)).mtimeMs
+    })).sort((a, b) => b.time - a.time);
+
+    if (pngs.length > 0) {
+      res.setHeader('Content-Type', 'image/png');
+      return fs.createReadStream(path.join(debugDir, pngs[0].name)).pipe(res);
+    }
+  }
+
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
+    <rect width="800" height="450" fill="#0f172a" rx="8"/>
+    <rect x="20" y="20" width="760" height="410" fill="none" stroke="#1e293b" stroke-width="2" stroke-dasharray="6,6" rx="6"/>
+    <circle cx="400" cy="200" r="32" fill="#1e293b"/>
+    <polygon points="392,188 414,200 392,212" fill="#64748b"/>
+    <text x="50%" y="260" text-anchor="middle" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="16" font-weight="600">Headless Browser Stream Idle</text>
+    <text x="50%" y="285" text-anchor="middle" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="13">Live Playwright viewports will mirror here when automation starts</text>
+  </svg>`);
+});
+
+// Periodic SSE Telemetry and Screenshot Dispatcher
+let lastScreenshotMtime = 0;
+setInterval(() => {
+  if (sseClients.size === 0) return;
+  try {
+    broadcastEvent('telemetry', getProviderTelemetry());
+  } catch {}
+
+  const latestPng = path.join(__dirname, 'debug', 'latest.png');
+  if (fs.existsSync(latestPng)) {
+    try {
+      const mtime = fs.statSync(latestPng).mtimeMs;
+      if (mtime > lastScreenshotMtime) {
+        lastScreenshotMtime = mtime;
+        broadcastEvent('screenshot', { timestamp: mtime, url: `/api/screenshot/latest?t=${mtime}` });
+      }
+    } catch {}
+  }
+}, 3000);
 
 // Fallback HTML route
 app.use((req, res) => {

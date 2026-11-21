@@ -725,12 +725,35 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
+    evtSource.addEventListener('telemetry', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        renderTelemetry(data);
+      } catch {}
+    });
+
+    evtSource.addEventListener('screenshot', (e) => {
+      try {
+        const { url, timestamp } = JSON.parse(e.data);
+        const canvasImg = document.getElementById('liveCanvasImg');
+        const lastUpdated = document.getElementById('canvasLastUpdated');
+        if (canvasImg) {
+          canvasImg.src = url;
+        }
+        if (lastUpdated) {
+          lastUpdated.textContent = `Last frame: ${new Date(timestamp).toLocaleTimeString()}`;
+        }
+      } catch {}
+    });
+
     evtSource.addEventListener('run_start', () => {
       fetchStatus();
+      loadRunHistory();
     });
 
     evtSource.addEventListener('run_end', () => {
       fetchStatus();
+      loadRunHistory();
     });
 
     evtSource.addEventListener('answer_uploaded', () => {
@@ -752,8 +775,225 @@ document.addEventListener('DOMContentLoaded', () => {
       .replace(/'/g, '&#039;');
   }
 
+  // -------------------------------------------------------------
+  // AI TELEMETRY & GAS GAUGES
+  // -------------------------------------------------------------
+  function renderTelemetry(telemetry) {
+    if (!telemetry) return;
+    const geminiRpm = document.getElementById('geminiRpm');
+    const geminiGauge = document.getElementById('geminiGauge');
+    const groqStatus = document.getElementById('groqStatus');
+
+    if (telemetry.quotas && telemetry.quotas[0] && geminiRpm) {
+      const q = telemetry.quotas[0];
+      geminiRpm.textContent = `${q.rpm || 0} RPM (Day: ${q.today || 0})`;
+    }
+
+    if (telemetry.providers) {
+      if (geminiGauge && telemetry.providers.gemini) {
+        const slot0 = telemetry.providers.gemini.slots?.[0];
+        const circuit = slot0?.circuit || 'CLOSED';
+        const isDead = slot0?.isDead;
+        const color = isDead || circuit === 'OPEN' ? '#ef4444' : (circuit === 'HALF_OPEN' ? '#f59e0b' : '#10b981');
+        geminiGauge.innerHTML = `<span style="color: ${color};">●</span> Gemini: <span id="geminiRpm">${geminiRpm?.textContent || 'Active'}</span>`;
+      }
+
+      if (groqStatus && telemetry.providers.groq) {
+        const circuit = telemetry.providers.groq.circuit || 'CLOSED';
+        const isConfigured = telemetry.providers.groq.configured;
+        if (!isConfigured) {
+          groqStatus.textContent = 'Not Configured';
+        } else if (circuit === 'OPEN') {
+          groqStatus.textContent = 'Circuit OPEN';
+          groqStatus.style.color = '#ef4444';
+        } else {
+          groqStatus.textContent = 'Ready (70B)';
+          groqStatus.style.color = '#10b981';
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------
+  // LIVE VIEWPORT REFRESH
+  // -------------------------------------------------------------
+  const btnRefreshCanvas = document.getElementById('btnRefreshCanvas');
+  if (btnRefreshCanvas) {
+    btnRefreshCanvas.addEventListener('click', () => {
+      const canvasImg = document.getElementById('liveCanvasImg');
+      if (canvasImg) {
+        canvasImg.src = `/api/screenshot/latest?t=${Date.now()}`;
+      }
+    });
+  }
+
+  // -------------------------------------------------------------
+  // RUN HISTORY & AUDIT REPLAY
+  // -------------------------------------------------------------
+  const runsListContainer = document.getElementById('runsListContainer');
+  const btnRefreshRuns = document.getElementById('btnRefreshRuns');
+  const runDetailDrawer = document.getElementById('runDetailDrawer');
+  const btnCloseRunDetail = document.getElementById('btnCloseRunDetail');
+
+  if (btnRefreshRuns) {
+    btnRefreshRuns.addEventListener('click', loadRunHistory);
+  }
+
+  if (btnCloseRunDetail && runDetailDrawer) {
+    btnCloseRunDetail.addEventListener('click', () => {
+      runDetailDrawer.style.display = 'none';
+    });
+  }
+
+  async function loadRunHistory() {
+    if (!runsListContainer) return;
+    try {
+      const res = await fetch('/api/runs');
+      const data = await res.json();
+      if (!data.ok || !data.runs || data.runs.length === 0) {
+        runsListContainer.innerHTML = `
+          <div style="font-size: 0.85rem; color: var(--text-muted); font-style: italic; padding: 1rem 0;">
+            No historical run envelopes recorded yet. Runs will appear here automatically upon execution.
+          </div>
+        `;
+        return;
+      }
+
+      runsListContainer.innerHTML = '';
+      data.runs.slice(0, 15).forEach((run) => {
+        const item = document.createElement('div');
+        item.style.background = 'rgba(15, 23, 42, 0.6)';
+        item.style.border = '1px solid var(--border-subtle)';
+        item.style.borderRadius = '8px';
+        item.style.padding = '0.85rem 1rem';
+        item.style.display = 'flex';
+        item.style.justifyContent = 'space-between';
+        item.style.alignItems = 'center';
+        item.style.gap = '1rem';
+
+        const dateStr = run.startedAt ? new Date(run.startedAt).toLocaleString() : 'Recent';
+        const modeBadge = run.mode === 'submit'
+          ? '<span class="badge badge-passed">LIVE SUBMIT</span>'
+          : '<span class="badge badge-pending">DRY-RUN</span>';
+        const solved = run.metrics?.problemsSolved || run.metrics?.solved || 0;
+        const total = run.entryCount || 0;
+
+        item.innerHTML = `
+          <div>
+            <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">
+              <span style="font-weight: 600; font-family: var(--font-mono); color: #fff;">${escapeHtml(run.runId)}</span>
+              ${modeBadge}
+            </div>
+            <div style="font-size: 0.78rem; color: var(--text-muted);">
+              Started: ${dateStr} • Items Handled: ${total} • Passed/Solved: ${solved}
+            </div>
+          </div>
+          <button class="btn btn-secondary btn-inspect-run" data-run-id="${escapeHtml(run.runId)}" style="padding: 0.35rem 0.75rem; font-size: 0.78rem; white-space: nowrap;">
+            Inspect Execution
+          </button>
+        `;
+
+        runsListContainer.appendChild(item);
+      });
+
+      document.querySelectorAll('.btn-inspect-run').forEach((b) => {
+        b.addEventListener('click', (e) => {
+          const runId = e.currentTarget.getAttribute('data-run-id');
+          if (runId) loadRunDetail(runId);
+        });
+      });
+    } catch (err) {
+      console.error('Failed to load runs:', err);
+    }
+  }
+
+  async function loadRunDetail(runId) {
+    if (!runDetailDrawer) return;
+    try {
+      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
+      const data = await res.json();
+      if (!data.ok || !data.run) return;
+
+      const run = data.run;
+      const detailRunTitle = document.getElementById('detailRunTitle');
+      const detailRunMetrics = document.getElementById('detailRunMetrics');
+      const detailRunEntries = document.getElementById('detailRunEntries');
+
+      if (detailRunTitle) {
+        detailRunTitle.textContent = `Run Audit Envelope: ${run.runId}`;
+      }
+
+      if (detailRunMetrics) {
+        const metrics = run.metrics || {};
+        detailRunMetrics.innerHTML = `
+          <div class="stat-card" style="padding: 0.65rem;">
+            <div class="stat-label">Mode</div>
+            <div class="stat-value" style="font-size: 1.1rem;">${escapeHtml(run.mode || 'dry-run')}</div>
+          </div>
+          <div class="stat-card" style="padding: 0.65rem;">
+            <div class="stat-label">Problems Seen</div>
+            <div class="stat-value" style="font-size: 1.1rem;">${metrics.problemsRead || metrics.assignmentsSeen || 0}</div>
+          </div>
+          <div class="stat-card" style="padding: 0.65rem;">
+            <div class="stat-label">Solved / Passed</div>
+            <div class="stat-value" style="font-size: 1.1rem; color: var(--accent-emerald);">${metrics.problemsSolved || metrics.solved || 0}</div>
+          </div>
+          <div class="stat-card" style="padding: 0.65rem;">
+            <div class="stat-label">Failed</div>
+            <div class="stat-value" style="font-size: 1.1rem; color: #ef4444;">${metrics.problemsFailed || metrics.failed || 0}</div>
+          </div>
+        `;
+      }
+
+      if (detailRunEntries) {
+        detailRunEntries.innerHTML = '';
+        const entries = Array.isArray(run.entries) ? run.entries : [];
+        if (entries.length === 0) {
+          detailRunEntries.innerHTML = `<div style="font-size: 0.8rem; color: var(--text-muted); font-style: italic;">No individual question entries logged in this run envelope.</div>`;
+        } else {
+          entries.forEach((e) => {
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.justifyContent = 'space-between';
+            row.style.alignItems = 'center';
+            row.style.padding = '0.45rem 0.65rem';
+            row.style.borderRadius = '5px';
+            row.style.background = 'rgba(15, 23, 42, 0.4)';
+            row.style.fontSize = '0.8rem';
+            row.style.fontFamily = 'var(--font-mono)';
+
+            const status = e.result || e.status || 'unknown';
+            let pillClass = 'badge-pending';
+            let mark = '↺';
+            if (status === 'pass') {
+              pillClass = 'badge-passed';
+              mark = '✓';
+            } else if (status === 'fail') {
+              pillClass = 'badge-failed';
+              mark = '✗';
+            }
+
+            row.innerHTML = `
+              <span style="color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 75%;">
+                ${mark} ${escapeHtml(e.title || e.url || 'Item')}
+              </span>
+              <span class="badge ${pillClass}">${escapeHtml(status.toUpperCase())}</span>
+            `;
+            detailRunEntries.appendChild(row);
+          });
+        }
+      }
+
+      runDetailDrawer.style.display = 'block';
+      runDetailDrawer.scrollIntoView({ behavior: 'smooth' });
+    } catch (err) {
+      console.error('Failed to load run detail:', err);
+    }
+  }
+
   // Initial Data Load
   fetchStatus();
   fetchAnswers();
+  loadRunHistory();
   initSSE();
 });
