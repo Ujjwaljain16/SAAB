@@ -47,7 +47,7 @@ process.on('SIGTERM', () => handleStopSignal('SIGTERM', 'Terminated (SIGTERM)'))
 const DELAY = (ms) => new Promise(r => setTimeout(r, ms));
 
 // Refuse unknown CLI arguments: a typo like `npm run start :mcq` used to be ignored and silently ran EVERYTHING in live-submit mode.
-const KNOWN_FLAGS = ['--log-time', '--dry-run', '--submit', '--skip-labs', '--only-mcq', '--only-labs', '--bits', '--recheck', '--force', '--refresh-curriculum', '--live'];
+const KNOWN_FLAGS = ['--log-time', '--dry-run', '--submit', '--skip-labs', '--only-mcq', '--only-labs', '--bits', '--recheck', '--force', '--refresh-curriculum', '--live', '--clear-cache'];
 const KNOWN_PREFIXES = ['--class=', '--subject=', '--max-submissions=', '--course=', '--assignment=', '--e2e-class=', '--e2e-submit-lab='];
 const unknownArgs = process.argv.slice(2).filter((a) => !KNOWN_FLAGS.includes(a) && !KNOWN_PREFIXES.some((p) => a.startsWith(p)));
 if (unknownArgs.length > 0) {
@@ -56,7 +56,8 @@ if (unknownArgs.length > 0) {
   console.error('For MCQ-only use: npm run start:mcq   (no space before the colon)');
   process.exit(2);
 }
-const DRY_RUN = process.argv.includes('--dry-run') && !process.argv.includes('--submit');
+// Safe by default: runs in dry-run preview mode unless --submit or --live is explicitly requested.
+const DRY_RUN = !process.argv.includes('--submit') && !process.argv.includes('--live');
 const CLASS_FILTER = process.argv.find(a => a.startsWith('--class='))?.split('=')[1] || '';
 const SUBJECT_FILTER = process.argv.find(a => a.startsWith('--subject='))?.split('=')[1] || '';
 const SKIP_LABS = process.argv.includes('--skip-labs') || process.env.SKIP_LABS === 'true';
@@ -208,6 +209,11 @@ async function ensureLoggedIn(page, ctx, reason = 'session check') {
 }
 
 async function run() {
+  if (process.argv.includes('--clear-cache')) {
+    const { pruneCache } = await import('./scripts/prune_cache.js');
+    pruneCache({ all: true });
+  }
+
   if (IS_BITS) {
     const { runBits } = await import('./bits_main.js');
     return runBits();

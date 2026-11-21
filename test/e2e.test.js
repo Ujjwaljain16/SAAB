@@ -105,7 +105,7 @@ const submitsOf = (id, seen) => seen.filter((e) => e === `submit ${id}`).length;
 const choicesOf = (id, seen) => seen.filter((e) => e.startsWith(`choice ${id} `)).map((e) => Number(e.split(' ')[2]));
 
 test('solved questions are never touched; wrong MCQ answers get up to 3 tries with rejected options excluded', async () => {
-  const { code, out } = await runAgent(['--only-mcq']);
+  const { code, out } = await runAgent(['--only-mcq', '--submit']);
   const seen = events();
   const ctx = `\n--- events: ${seen.join(' | ')}\n--- output tail:\n${out.slice(-3000)}`;
 
@@ -145,7 +145,7 @@ test('solved questions are never touched; wrong MCQ answers get up to 3 tries wi
 test('a re-run submits nothing: solved ones are checkpointed and Q8 already used up its 3 tries', async () => {
   fs.writeFileSync(mockLog, '');
   const aiBefore = aiRequests.length;
-  const { code, out } = await runAgent(['--only-mcq']);
+  const { code, out } = await runAgent(['--only-mcq', '--submit']);
   const seen = events();
 
   assert.equal(code, 0, out.slice(-2000));

@@ -41,10 +41,13 @@ test('a mistyped argument is refused (exit 2) instead of silently running everyt
   assert.match(out, /npm run start:mcq/);
 });
 
-test('live mode shows a clear warning banner before doing anything; a dry run does not', () => {
-  const live = run([], { GEMINI_API_KEY: 'placeholder' }, 60000);
+test('live mode shows a clear warning banner before doing anything; default and dry-run do not', () => {
+  const live = run(['--submit'], { GEMINI_API_KEY: 'placeholder' }, 60000);
   assert.match(live.out, /LIVE MODE: SAAB will SUBMIT answers/);
   assert.match(live.out, /dry-run:mcq/, 'points at the safe way to start');
+
+  const def = run([], { GEMINI_API_KEY: 'placeholder' });
+  assert.ok(!/LIVE MODE/.test(def.out), 'default invocation with no flags is safe dry-run');
 
   const dry = run(['--dry-run'], { GEMINI_API_KEY: 'placeholder' });
   assert.ok(!/LIVE MODE/.test(dry.out));

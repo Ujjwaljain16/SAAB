@@ -888,22 +888,33 @@ export async function processCourseraAssessment(page, assignmentUrl, options = {
 
       // Scrape question review cards if review is visible
       const wrongQuestionIndices = [];
+      const correctQuestionIndices = [];
       const questionCards = Array.from(document.querySelectorAll('div[data-testid^="part-Submission_"], div[role="region"], fieldset, .rc-FormPart'));
       for (let i = 0; i < questionCards.length; i++) {
         const card = questionCards[i];
         const cardText = (card.innerText || '').toLowerCase();
         const cardHtml = card.innerHTML || '';
+        const qMatch = (card.innerText || '').match(/(?:Question|Problem)\s*(\d+)/i);
+        const qNum = qMatch ? parseInt(qMatch[1], 10) : i + 1;
+
         const isWrong = cardText.includes('incorrect') ||
                         cardText.includes('0 / 1 point') ||
                         cardText.includes('0/1 point') ||
                         cardText.includes('0 of 1 point') ||
                         cardHtml.includes('aria-label="Incorrect"');
+        const isCorrect = cardText.includes('1 / 1 point') ||
+                          cardText.includes('1/1 point') ||
+                          cardText.includes('1 of 1 point') ||
+                          cardHtml.includes('aria-label="Correct"');
+
         if (isWrong) {
-          wrongQuestionIndices.push(i + 1);
+          wrongQuestionIndices.push(qNum);
+        } else if (isCorrect) {
+          correctQuestionIndices.push(qNum);
         }
       }
 
-      return { gradePercent, isPassed, hasFailedSignal, wrongQuestionIndices };
+      return { gradePercent, isPassed, hasFailedSignal, wrongQuestionIndices, correctQuestionIndices };
     }).catch(() => null);
 
     if (postSubmitData && (postSubmitData.gradePercent !== null || postSubmitData.wrongQuestionIndices.length > 0 || postSubmitData.isPassed)) {
@@ -939,6 +950,21 @@ export async function processCourseraAssessment(page, assignmentUrl, options = {
           recordWrongMCQOption(recordedAns.cacheKey, idx);
           console.log(`   ❌ Q${wrongQNum}: Recorded wrong option index ${idx} for cache key.`);
         }
+      }
+    }
+  }
+
+  // Seed verified correct answers directly into cache for future runs & retries
+  if (postSubmitData?.correctQuestionIndices?.length > 0) {
+    for (const correctQNum of postSubmitData.correctQuestionIndices) {
+      const recordedAns = answersLog.find(a => a.questionIndex === correctQNum);
+      if (recordedAns && recordedAns.cacheKey && Array.isArray(recordedAns.chosenIndices) && recordedAns.chosenIndices.length > 0) {
+        commitSolution(recordedAns.cacheKey, {
+          bestOptionIndex: recordedAns.chosenIndices[0],
+          selectedIndices: recordedAns.chosenIndices,
+          reasoning: 'Verified correct from live assessment review screen'
+        });
+        console.log(`   ✓ Q${correctQNum}: Saved verified solution to persistent cache.`);
       }
     }
   }

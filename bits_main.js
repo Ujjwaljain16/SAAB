@@ -28,7 +28,7 @@ process.on('SIGTERM', () => {
 const DELAY = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function runBits(options = {}) {
-  const DRY_RUN = options.dryRun ?? (process.argv.includes('--dry-run') && !process.argv.includes('--submit'));
+  const DRY_RUN = options.dryRun ?? (!process.argv.includes('--submit') && !process.argv.includes('--live'));
   const COURSE_ARG = options.course ?? (process.argv.find((a) => a.startsWith('--course='))?.split('=')[1] || '');
   const ASSIGNMENT_ARG = options.assignment ?? (process.argv.find((a) => a.startsWith('--assignment='))?.split('=')[1] || '');
   const LIMIT_ARG = parseInt(options.limit ?? (process.argv.find((a) => a.startsWith('--limit='))?.split('=')[1] || '0'), 10);

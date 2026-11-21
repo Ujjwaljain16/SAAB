@@ -28,6 +28,8 @@
     "package:extension": "npm --prefix extension run package:zip",
     "dry-run": "node main.js --dry-run",
     "dry-run:mcq": "node main.js --dry-run --only-mcq",
+    "cache:prune": "node scripts/prune_cache.js",
+    "cache:clear": "node scripts/prune_cache.js --all",
     "test": "node --test \"test/*.test.js\"",
     "lint": "eslint ."
   },
