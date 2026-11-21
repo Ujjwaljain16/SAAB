@@ -30,7 +30,7 @@
     "dry-run:mcq": "node main.js --dry-run --only-mcq",
     "cache:prune": "node scripts/prune_cache.js",
     "cache:clear": "node scripts/prune_cache.js --all",
-    "test": "node --test \"test/*.test.js\"",
+    "test": "node scripts/run_tests.js",
     "lint": "eslint ."
   },
   "dependencies": {
